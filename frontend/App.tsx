@@ -1,6 +1,5 @@
 import React, { useState, useRef } from 'react';
 import {
-  SafeAreaView,
   StyleSheet,
   Text,
   TextInput,
@@ -12,6 +11,7 @@ import {
   ScrollView,
   Image
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Camera, useCameraDevice, PhotoFile } from 'react-native-vision-camera';
 import ImageResizer from 'react-native-image-resizer';
 import RNFS from 'react-native-fs';
