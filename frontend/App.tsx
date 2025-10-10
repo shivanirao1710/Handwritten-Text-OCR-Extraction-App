@@ -20,7 +20,8 @@ import RNFS from 'react-native-fs';
 export default function App() {
   // --- State Management ---
   const [hasPermission, setHasPermission] = useState(false);
-  const [screen, setScreen] = useState('register'); // 'register', 'login', 'dashboard', 'camera', 'confirmPhoto', 'review'
+  // <<< MODIFIED >>> Added 'processing' screen state
+  const [screen, setScreen] = useState('register'); // 'register', 'login', 'dashboard', 'camera', 'confirmPhoto', 'review', 'processing'
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [authToken, setAuthToken] = useState<string | null>(null);
@@ -34,7 +35,7 @@ export default function App() {
   const camera = useRef<Camera>(null);
 
   // --- Configuration ---
-  const API_BASE_URL = 'https://4d46d7f64c71.ngrok-free.app';
+  const API_BASE_URL = 'https://a5f9297cbbf4.ngrok-free.app';
 
   // --- Effects ---
   React.useEffect(() => {
@@ -145,32 +146,18 @@ const handleRotate = async () => {
   if (!capturedPhoto) return;
 
   try {
-    // Increment rotation
     const newRotation = (rotation + 90) % 360;
     setRotation(newRotation);
 
     const imagePath = Platform.OS === 'android' ? `file://${capturedPhoto.path}` : capturedPhoto.path;
 
-    // Rotate image physically
     const rotatedImage = await ImageResizer.createResizedImage(
-      imagePath,
-      1080,   // width
-      1080,   // height
-      'JPEG',
-      100,    // quality
-      newRotation, // rotation
-      undefined,
-      false,  // don't keep EXIF
+      imagePath, 1080, 1080, 'JPEG', 100, newRotation, undefined, false,
       { mode: 'contain', onlyScaleDown: false }
     );
 
-    // Replace capturedPhoto with rotated one
-    // Remove 'file://' prefix for Android
     const uri = rotatedImage.uri.startsWith('file://') ? rotatedImage.uri.replace('file://', '') : rotatedImage.uri;
-
     setCapturedPhoto({ ...capturedPhoto, path: uri });
-
-    // Reset rotation to 0 for Image component, because the image is now physically rotated
     setRotation(0);
 
   } catch (error) {
@@ -179,10 +166,13 @@ const handleRotate = async () => {
   }
 };
 
-
+  // <<< MODIFIED >>> Updated the scan handler logic
   const handleConfirmAndScan = async () => {
     if (!capturedPhoto) return;
+
+    setScreen('processing'); // Navigate to processing screen immediately
     setIsLoading(true);
+
     try {
       const imagePath = Platform.OS === 'android' ? `file://${capturedPhoto.path}` : capturedPhoto.path;
       const formData = new FormData();
@@ -202,18 +192,21 @@ const handleRotate = async () => {
         const result = await response.json();
         Alert.alert('Scan Successful', `Extracted Text: ${result.extracted_text}`);
         setScreen('dashboard');
+        setCapturedPhoto(null); // Clear photo on success
       } else {
         const errorData = await response.json();
         Alert.alert('Scan Failed', errorData.detail || 'Could not process the image.');
+        setScreen('confirmPhoto'); // On failure, return to confirmation screen
       }
     } catch (error) {
       console.error('Scan Error:', error);
       Alert.alert('Error', 'An unexpected error occurred while scanning.');
+      setScreen('confirmPhoto'); // On error, return to confirmation screen
     } finally {
       setIsLoading(false);
-      setCapturedPhoto(null);
     }
   };
+
 
   const handleReviewTickets = async () => {
     setIsLoading(true);
@@ -271,19 +264,23 @@ const handleRotate = async () => {
 
   if (screen === 'dashboard') {
     return (
-      <View style={styles.container}>
-        <Text style={styles.title}>Dashboard</Text>
-        <Text style={styles.subtitle}>Welcome, {username}!</Text>
-        <TouchableOpacity style={styles.buttonWide} onPress={() => setScreen('camera')}>
-          <Text style={styles.buttonText}>Scan Ticket</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.buttonWide} onPress={handleReviewTickets}>
-          <Text style={styles.buttonText}>Review Tickets</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={[styles.buttonWide, styles.logoutButton]} onPress={handleLogout}>
-          <Text style={styles.buttonText}>Logout</Text>
-        </TouchableOpacity>
-      </View>
+      <SafeAreaView style={styles.dashboardContainer}>
+        <View style={styles.header}>
+            <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+                <Text style={styles.buttonText}>Logout</Text>
+            </TouchableOpacity>
+        </View>
+        <View style={styles.content}>
+            <Text style={styles.title}>Dashboard</Text>
+            <Text style={styles.subtitle}>Welcome, {username}!</Text>
+            <TouchableOpacity style={styles.buttonWide} onPress={() => setScreen('camera')}>
+                <Text style={styles.buttonText}>Scan Ticket</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.buttonWide} onPress={handleReviewTickets}>
+                <Text style={styles.buttonText}>Review Tickets</Text>
+            </TouchableOpacity>
+        </View>
+      </SafeAreaView>
     );
   }
 
@@ -325,7 +322,6 @@ const handleRotate = async () => {
             source={{ uri: `file://${capturedPhoto.path}` }}
           />
         </View>
-        {isLoading && <ActivityIndicator size="large" style={{ marginVertical: 20 }} />}
         <View style={styles.confirmationControls}>
           <TouchableOpacity style={[styles.button, styles.retakeButton]} onPress={() => setScreen('camera')} disabled={isLoading}>
             <Text style={styles.buttonText}>Retake</Text>
@@ -338,6 +334,25 @@ const handleRotate = async () => {
           </TouchableOpacity>
         </View>
       </SafeAreaView>
+    );
+  }
+
+  // <<< ADDED >>> New screen for processing feedback
+  if (screen === 'processing' && capturedPhoto) {
+    return (
+        <SafeAreaView style={styles.container}>
+            <Text style={styles.title}>Processing...</Text>
+            <View style={styles.processingContainer}>
+                <Image
+                    style={[styles.previewImage, styles.processingImage]}
+                    source={{ uri: `file://${capturedPhoto.path}` }}
+                />
+                <View style={styles.overlay}>
+                    <ActivityIndicator size="large" color="#fff" />
+                    <Text style={styles.processingText}>Scanning your ticket</Text>
+                </View>
+            </View>
+        </SafeAreaView>
     );
   }
 
@@ -369,15 +384,34 @@ const handleRotate = async () => {
 // --- Styles ---
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, backgroundColor: '#f5f5f5', justifyContent: 'center' },
+  dashboardContainer: {
+    flex: 1,
+    backgroundColor: '#f5f5f5',
+  },
+  header: {
+    padding: 20,
+    alignItems: 'flex-end',
+  },
+  content: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  logoutButton: {
+    backgroundColor: '#dc3545',
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+  },
   fullScreen: { flex: 1, backgroundColor: 'black' },
   title: { fontSize: 28, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
   subtitle: { fontSize: 18, textAlign: 'center', marginBottom: 30, color: '#666' },
   input: { height: 50, borderColor: '#ccc', borderWidth: 1, borderRadius: 8, marginBottom: 15, paddingHorizontal: 15, backgroundColor: '#fff' },
   button: { backgroundColor: '#007bff', padding: 15, borderRadius: 8, alignItems: 'center', flex: 1, marginHorizontal: 5 },
-  buttonWide: { backgroundColor: '#007bff', padding: 15, borderRadius: 8, alignItems: 'center', marginBottom: 10 },
+  buttonWide: { backgroundColor: '#007bff', padding: 15, borderRadius: 8, alignItems: 'center', marginBottom: 10, width: '90%' },
   retakeButton: { backgroundColor: '#6c757d' },
   rotateButton: { backgroundColor: '#17a2b8' },
-  logoutButton: { backgroundColor: '#dc3545' },
   buttonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
   switchText: { marginTop: 15, textAlign: 'center', color: '#007bff' },
   cameraControls: { position: 'absolute', bottom: 0, width: '100%', padding: 20, flexDirection: 'row', justifyContent: 'center' },
@@ -387,5 +421,28 @@ const styles = StyleSheet.create({
   backButtonText: { color: 'white', fontSize: 16 },
   ticket: { backgroundColor: '#fff', padding: 15, borderRadius: 8, marginBottom: 10, borderWidth: 1, borderColor: '#eee' },
   previewImage: { width: '100%', height: 300, resizeMode: 'contain', borderRadius: 10, marginBottom: 20 },
-  confirmationControls: { flexDirection: 'row', justifyContent: 'space-around' },
+  confirmationControls: { flexDirection: 'row', justifyContent: 'space-around', width: '100%' },
+  // <<< ADDED >>> Styles for the new processing screen
+  processingContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+  },
+  processingImage: {
+    opacity: 0.6,
+  },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    borderRadius: 10,
+  },
+  processingText: {
+    color: '#fff',
+    marginTop: 10,
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
 });
+
