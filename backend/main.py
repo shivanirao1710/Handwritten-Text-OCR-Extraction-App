@@ -4,7 +4,6 @@ import shutil
 import json
 from PIL import Image, ImageDraw
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
-# <<< MODIFIED >>> Import CORSMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -41,16 +40,14 @@ os.makedirs(DEBUG_DIR, exist_ok=True)
 
 app = FastAPI(title="Advanced Handwritten Scanner API")
 
-# <<< MODIFIED >>> Add CORS Middleware
-# This is essential for your web app to be able to communicate with the API
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-
 
 app.mount(f"/{TICKETS_DIR}", StaticFiles(directory=TICKETS_DIR), name="tickets")
 app.mount(f"/{DEBUG_DIR}", StaticFiles(directory=DEBUG_DIR), name="debug")
@@ -285,7 +282,7 @@ def login(form: OAuth2PasswordRequestForm=Depends(), db: Session=Depends(databas
     user = db.query(models.User).filter(models.User.username == form.username).first()
     if not user or not verify_password(form.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
-    # <<< MODIFIED >>> Added user_id to the login response
+    # Added user_id to the login response
     return {
         "access_token": create_access_token({"sub": user.username}),
         "token_type": "bearer",
@@ -348,8 +345,49 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
             except OSError as e:
                 print(f"Error removing debug directory {debug_scan_dir}: {e.strerror}")
 
+# ADDED: Update ticket endpoint
+# Add this endpoint - use a completely different path to avoid conflicts
+@app.post("/update-ticket-text")
+def update_ticket_text(
+    request: dict,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    print(f"🔄 Update ticket request received: {request}")
+    
+    if "ticket_id" not in request or "extracted_text" not in request:
+        raise HTTPException(status_code=400, detail="ticket_id and extracted_text are required")
+    
+    ticket_id = request["ticket_id"]
+    new_text = request["extracted_text"]
+    
+    # Find the ticket
+    ticket = db.query(models.Ticket).filter(
+        models.Ticket.id == ticket_id,
+        models.Ticket.owner_id == current_user.id
+    ).first()
+    
+    if not ticket:
+        print(f"❌ Ticket {ticket_id} not found for user {current_user.id}")
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    
+    print(f"📝 Updating ticket {ticket_id} text to: {new_text}")
+    ticket.extracted_text = new_text
+    db.commit()
+    db.refresh(ticket)
+    
+    response_data = {
+        "message": "Ticket updated successfully",
+        "ticket": {
+            "id": ticket.id,
+            "extracted_text": ticket.extracted_text,
+            "image_url": ticket.image_path
+        }
+    }
+    print(f"✅ Update successful: {response_data}")
+    return response_data
 
-# <<< MODIFIED >>> This endpoint is updated to return a web-accessible URL
+# This endpoint is updated to return a web-accessible URL
 @app.get("/tickets")
 def get_tickets(current_user: models.User = Depends(get_current_user), db: Session = Depends(database.get_db)):
     tickets_from_db = db.query(models.Ticket).filter(models.Ticket.owner_id == current_user.id).all()
