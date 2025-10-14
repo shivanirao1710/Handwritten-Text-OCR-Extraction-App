@@ -4,6 +4,8 @@ import shutil
 import json
 from PIL import Image, ImageDraw
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+# <<< MODIFIED >>> Import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -38,6 +40,18 @@ os.makedirs(TEMP_LINES_DIR, exist_ok=True)
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
 app = FastAPI(title="Advanced Handwritten Scanner API")
+
+# <<< MODIFIED >>> Add CORS Middleware
+# This is essential for your web app to be able to communicate with the API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
+
 app.mount(f"/{TICKETS_DIR}", StaticFiles(directory=TICKETS_DIR), name="tickets")
 app.mount(f"/{DEBUG_DIR}", StaticFiles(directory=DEBUG_DIR), name="debug")
 
@@ -91,9 +105,7 @@ def enhance_cell_image(cell_cv_image):
 
     _, final_image = cv2.threshold(contrasted, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    # <<< THE FIX IS HERE >>>
-    # Convert the final single-channel B&W image back to a 3-channel RGB image.
-    # The TrOCR model expects a 3-channel input, and this was the cause of the blank output.
+    # The TrOCR model expects a 3-channel input.
     final_image_rgb = cv2.cvtColor(final_image, cv2.COLOR_GRAY2RGB)
     
     return Image.fromarray(final_image_rgb)
@@ -273,7 +285,12 @@ def login(form: OAuth2PasswordRequestForm=Depends(), db: Session=Depends(databas
     user = db.query(models.User).filter(models.User.username == form.username).first()
     if not user or not verify_password(form.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
-    return {"access_token": create_access_token({"sub": user.username}), "token_type": "bearer"}
+    # <<< MODIFIED >>> Added user_id to the login response
+    return {
+        "access_token": create_access_token({"sub": user.username}),
+        "token_type": "bearer",
+        "user_id": user.id
+    }
 
 @app.post("/scan")
 async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depends(get_current_user), db: Session=Depends(database.get_db)):
@@ -286,14 +303,21 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
     os.makedirs(debug_scan_dir, exist_ok=True)
 
     try:
-        with open(saved_image_path, "wb") as f: f.write(await file.read())
-        image_pil = Image.open(saved_image_path).convert("RGB")
+        # Use a non-blocking way to write the file content
+        file_content = await file.read()
+        with open(saved_image_path, "wb") as f:
+            f.write(file_content)
+            
+        image_pil = Image.open(io.BytesIO(file_content)).convert("RGB")
         table_result = extract_table_data_yolo(image_pil, debug_scan_dir)
 
         if table_result:
             print("✅ Table found! Processing as a table.")
-            db_text = json.dumps(table_result["extracted_table"])
-            response_data = table_result
+            # If the result is a table, we now format it as a string for display
+            # You could also keep it as JSON if the frontend can handle it
+            table_string = "\n".join([" | ".join(map(str, row)) for row in table_result["extracted_table"]])
+            db_text = table_string
+            response_data = {"extracted_text": db_text} # Keep response simple
         else:
             print("⚠️ No table found. Falling back to line-by-line segmentation.")
             line_result = extract_lines_data(saved_image_path, unique_filename)
@@ -303,22 +327,42 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
             db_text = line_result["extracted_text"]
             response_data = line_result
 
-        new_ticket = models.Ticket(extracted_text=db_text, owner_id=current_user.id, image_path=saved_image_path)
+        # The path stored in DB should be the URL path, not the file system path
+        image_url_path = f"/{TICKETS_DIR}/{unique_filename}"
+        new_ticket = models.Ticket(extracted_text=db_text, owner_id=current_user.id, image_path=image_url_path)
         db.add(new_ticket); db.commit(); db.refresh(new_ticket)
-        return {"filename": file.filename, "saved_path": saved_image_path, **response_data}
+        
+        # Add the saved_path to the response for the frontend
+        response_data["image_url"] = image_url_path
+        return {"filename": file.filename, **response_data}
 
     except Exception as e:
         if isinstance(e, HTTPException): raise e
         print(f"An unexpected error occurred: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
     finally:
+        # Clean up the temporary debug directory
         if os.path.exists(debug_scan_dir):
-            shutil.rmtree(debug_scan_dir)
-            pass
+            try:
+                shutil.rmtree(debug_scan_dir)
+            except OSError as e:
+                print(f"Error removing debug directory {debug_scan_dir}: {e.strerror}")
 
+
+# <<< MODIFIED >>> This endpoint is updated to return a web-accessible URL
 @app.get("/tickets")
 def get_tickets(current_user: models.User = Depends(get_current_user), db: Session = Depends(database.get_db)):
-    return db.query(models.Ticket).filter(models.Ticket.owner_id == current_user.id).all()
+    tickets_from_db = db.query(models.Ticket).filter(models.Ticket.owner_id == current_user.id).all()
+    
+    # Manually construct the response to ensure the field is named `image_url`
+    response = []
+    for ticket in tickets_from_db:
+        response.append({
+            "id": ticket.id,
+            "extracted_text": ticket.extracted_text,
+            "image_url": ticket.image_path # Assumes image_path is stored as a URL path
+        })
+    return response
 
 @app.get("/")
 def read_root():

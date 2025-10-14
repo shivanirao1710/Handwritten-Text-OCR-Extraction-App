@@ -28,4 +28,3 @@ class Ticket(Base):
     created_at = Column(DateTime, default=func.now())
 
     owner = relationship("User", back_populates="tickets")
-

@@ -20,13 +20,13 @@ import RNFS from 'react-native-fs';
 export default function App() {
   // --- State Management ---
   const [hasPermission, setHasPermission] = useState(false);
-  // <<< MODIFIED >>> Added 'processing' screen state
   const [screen, setScreen] = useState('register'); // 'register', 'login', 'dashboard', 'camera', 'confirmPhoto', 'review', 'processing'
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [userId, setUserId] = useState<number | null>(null);
-  const [tickets, setTickets] = useState<{ id: number, extracted_text: string }[]>([]);
+  // <<< MODIFIED >>> Added image_url to the ticket state
+  const [tickets, setTickets] = useState<{ id: number, extracted_text: string, image_url: string }[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [capturedPhoto, setCapturedPhoto] = useState<PhotoFile | null>(null);
   const [rotation, setRotation] = useState(0);
@@ -35,7 +35,7 @@ export default function App() {
   const camera = useRef<Camera>(null);
 
   // --- Configuration ---
-  const API_BASE_URL = 'https://a5f9297cbbf4.ngrok-free.app';
+  const API_BASE_URL = 'https://22ee68ac5e2b.ngrok-free.app';
 
   // --- Effects ---
   React.useEffect(() => {
@@ -142,35 +142,34 @@ export default function App() {
       }
     }
   };
-const handleRotate = async () => {
-  if (!capturedPhoto) return;
+  const handleRotate = async () => {
+    if (!capturedPhoto) return;
 
-  try {
-    const newRotation = (rotation + 90) % 360;
-    setRotation(newRotation);
+    try {
+      const newRotation = (rotation + 90) % 360;
+      setRotation(newRotation);
 
-    const imagePath = Platform.OS === 'android' ? `file://${capturedPhoto.path}` : capturedPhoto.path;
+      const imagePath = Platform.OS === 'android' ? `file://${capturedPhoto.path}` : capturedPhoto.path;
 
-    const rotatedImage = await ImageResizer.createResizedImage(
-      imagePath, 1080, 1080, 'JPEG', 100, newRotation, undefined, false,
-      { mode: 'contain', onlyScaleDown: false }
-    );
+      const rotatedImage = await ImageResizer.createResizedImage(
+        imagePath, 1080, 1080, 'JPEG', 100, newRotation, undefined, false,
+        { mode: 'contain', onlyScaleDown: false }
+      );
 
-    const uri = rotatedImage.uri.startsWith('file://') ? rotatedImage.uri.replace('file://', '') : rotatedImage.uri;
-    setCapturedPhoto({ ...capturedPhoto, path: uri });
-    setRotation(0);
+      const uri = rotatedImage.uri.startsWith('file://') ? rotatedImage.uri.replace('file://', '') : rotatedImage.uri;
+      setCapturedPhoto({ ...capturedPhoto, path: uri });
+      setRotation(0);
 
-  } catch (error) {
-    console.error('Rotation Error:', error);
-    Alert.alert('Error', 'Could not rotate image.');
-  }
-};
+    } catch (error) {
+      console.error('Rotation Error:', error);
+      Alert.alert('Error', 'Could not rotate image.');
+    }
+  };
 
-  // <<< MODIFIED >>> Updated the scan handler logic
   const handleConfirmAndScan = async () => {
     if (!capturedPhoto) return;
 
-    setScreen('processing'); // Navigate to processing screen immediately
+    setScreen('processing');
     setIsLoading(true);
 
     try {
@@ -192,16 +191,16 @@ const handleRotate = async () => {
         const result = await response.json();
         Alert.alert('Scan Successful', `Extracted Text: ${result.extracted_text}`);
         setScreen('dashboard');
-        setCapturedPhoto(null); // Clear photo on success
+        setCapturedPhoto(null);
       } else {
         const errorData = await response.json();
         Alert.alert('Scan Failed', errorData.detail || 'Could not process the image.');
-        setScreen('confirmPhoto'); // On failure, return to confirmation screen
+        setScreen('confirmPhoto');
       }
     } catch (error) {
       console.error('Scan Error:', error);
       Alert.alert('Error', 'An unexpected error occurred while scanning.');
-      setScreen('confirmPhoto'); // On error, return to confirmation screen
+      setScreen('confirmPhoto');
     } finally {
       setIsLoading(false);
     }
@@ -337,7 +336,6 @@ const handleRotate = async () => {
     );
   }
 
-  // <<< ADDED >>> New screen for processing feedback
   if (screen === 'processing' && capturedPhoto) {
     return (
         <SafeAreaView style={styles.container}>
@@ -356,6 +354,7 @@ const handleRotate = async () => {
     );
   }
 
+  // <<< MODIFIED >>> Updated review screen to display images
   if (screen === 'review') {
     return (
       <SafeAreaView style={styles.container}>
@@ -364,7 +363,14 @@ const handleRotate = async () => {
           {tickets.length > 0 ? (
             tickets.map(ticket => (
               <View key={ticket.id} style={styles.ticket}>
-                <Text>{ticket.extracted_text}</Text>
+                {ticket.image_url && (
+                    <Image
+                        source={{ uri: `${API_BASE_URL}${ticket.image_url}` }}
+                        style={styles.ticketImage}
+                        resizeMode="contain"
+                    />
+                )}
+                <Text style={styles.ticketText}>{ticket.extracted_text}</Text>
               </View>
             ))
           ) : (
@@ -409,7 +415,7 @@ const styles = StyleSheet.create({
   subtitle: { fontSize: 18, textAlign: 'center', marginBottom: 30, color: '#666' },
   input: { height: 50, borderColor: '#ccc', borderWidth: 1, borderRadius: 8, marginBottom: 15, paddingHorizontal: 15, backgroundColor: '#fff' },
   button: { backgroundColor: '#007bff', padding: 15, borderRadius: 8, alignItems: 'center', flex: 1, marginHorizontal: 5 },
-  buttonWide: { backgroundColor: '#007bff', padding: 15, borderRadius: 8, alignItems: 'center', marginBottom: 10, width: '90%' },
+  buttonWide: { backgroundColor: '#007bff', padding: 15, borderRadius: 8, alignItems: 'center', marginBottom: 10, alignSelf: 'center', width: '90%' },
   retakeButton: { backgroundColor: '#6c757d' },
   rotateButton: { backgroundColor: '#17a2b8' },
   buttonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
@@ -422,7 +428,6 @@ const styles = StyleSheet.create({
   ticket: { backgroundColor: '#fff', padding: 15, borderRadius: 8, marginBottom: 10, borderWidth: 1, borderColor: '#eee' },
   previewImage: { width: '100%', height: 300, resizeMode: 'contain', borderRadius: 10, marginBottom: 20 },
   confirmationControls: { flexDirection: 'row', justifyContent: 'space-around', width: '100%' },
-  // <<< ADDED >>> Styles for the new processing screen
   processingContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -444,5 +449,15 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
   },
+  // <<< ADDED >>> Styles for the ticket image and text
+  ticketImage: {
+    width: '100%',
+    height: 200,
+    borderRadius: 8,
+    marginBottom: 10,
+  },
+  ticketText: {
+    fontSize: 16,
+    color: '#333',
+  },
 });
-
