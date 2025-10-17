@@ -32,7 +32,7 @@ export default function App() {
   const [editedText, setEditedText] = useState('');
   const [isUpdating, setIsUpdating] = useState(false);
 
-  const API_BASE_URL = 'https://53a4780b487f.ngrok-free.app';
+  const API_BASE_URL = 'https://3cccff8b71ce.ngrok-free.app';
 
   // --- API & Event Handlers ---
 
@@ -156,7 +156,7 @@ export default function App() {
       }
     } catch (error) {
       console.error('Scan or Upload Error:', error);
-      Alert.alert('Error', 'An unexpected error occurred while scanning.');
+      Alert.alert('Please wait', 'The image is still being processed. This may take a moment.');
     } finally {
       setIsLoading(false);
       setScreen('dashboard'); // Always return to dashboard after processing

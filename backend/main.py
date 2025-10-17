@@ -79,7 +79,7 @@ else:
     print("✅ Custom YOLOv8 model loaded successfully.")
 
 # --------------------------------------------------------
-    # To identify dollar symbol
+# To identify dollar symbol
 # --------------------------------------------------------
 def correct_currency_symbols(text: str) -> str:
     """
@@ -96,6 +96,51 @@ def correct_currency_symbols(text: str) -> str:
     # The (?=...) part is a "lookahead" that checks without being part of the match.
     corrected_text = re.sub(r'\b[sS](?=\s?[\d.])', '$', text)
     return corrected_text
+
+# ------------------------------------------------------------------- #
+# --- NEW: IMAGE PREPROCESSING ---
+# ------------------------------------------------------------------- #
+
+def preprocess_image_for_ocr(image: Image.Image) -> Image.Image:
+    """
+    Converts any input image to a standardized format with a white background
+    and black text for optimal OCR performance.
+
+    Args:
+        image (Image.Image): The input PIL Image.
+
+    Returns:
+        Image.Image: The processed PIL Image with a white background and black text.
+    """
+    # Convert PIL Image to OpenCV format (BGR)
+    open_cv_image = np.array(image.convert("RGB"))
+    open_cv_image = open_cv_image[:, :, ::-1].copy()
+
+    # Convert to grayscale
+    gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
+
+    # Apply a slight blur to reduce noise before thresholding
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Apply Otsu's thresholding to binarize the image. This automatically finds
+    # the best threshold to separate foreground and background.
+    _, binarized = cv2.threshold(
+        blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    # Ensure the background is white and text is black.
+    # We check the average color of the binarized image. If the average is less
+    # than 128, it means most of the image is black (dark background),
+    # so we need to invert the colors.
+    if np.mean(binarized) < 128:
+        binarized = cv2.bitwise_not(binarized)
+
+    # Convert the processed grayscale image back to an RGB PIL Image
+    # as the rest of the pipeline expects a 3-channel image.
+    final_image_rgb = cv2.cvtColor(binarized, cv2.COLOR_GRAY2RGB)
+    return Image.fromarray(final_image_rgb)
+
+
 # ------------------------------------------------------------------- #
 # --- TABLE DETECTION & EXTRACTION (UNCHANGED) ---
 # ------------------------------------------------------------------- #
@@ -130,16 +175,13 @@ def extract_table_data_yolo(image: Image.Image, debug_dir_path: str):
     if yolo_model is None:
         print("⚠️ YOLO model is not loaded. Skipping table detection.")
         return None
+    # Since the input image is already preprocessed (B&W), we use it directly.
     original_image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    gray = cv2.cvtColor(original_image_cv, cv2.COLOR_BGR2GRAY)
-    processed_for_detection = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-    )
-    processed_for_detection_bgr = cv2.cvtColor(processed_for_detection, cv2.COLOR_GRAY2BGR)
-    cv2.imwrite(os.path.join(debug_dir_path, "1_preprocessed_for_detection.png"), processed_for_detection_bgr)
+    cv2.imwrite(os.path.join(debug_dir_path, "1_preprocessed_for_detection.png"), original_image_cv)
     
     print("Detecting table cells...")
-    results = yolo_model.predict(processed_for_detection_bgr, conf=0.2, verbose=False)
+    # The preprocessed image is ideal for detection.
+    results = yolo_model.predict(original_image_cv, conf=0.2, verbose=False)
 
     if not results or results[0].boxes is None or not results[0].boxes.xyxy.nelement():
         return None
@@ -172,6 +214,7 @@ def extract_table_data_yolo(image: Image.Image, debug_dir_path: str):
         for j, box in enumerate(row_boxes):
             x1, y1, x2, y2 = box
             padding = 2
+            # Crop from the preprocessed image passed to this function
             cell_image_cv = original_image_cv[
                 max(0, y1 - padding):min(original_image_cv.shape[0], y2 + padding),
                 max(0, x1 - padding):min(original_image_cv.shape[1], x2 + padding)
@@ -236,13 +279,15 @@ def segment_lines(image_path, output_dir):
     horizontal spacing. This is for borderless tables.
     Returns a 2D list of cropped cell image paths.
     """
+    # This function now receives the path to the already preprocessed image
     image = cv2.imread(image_path)
     if image is None: 
         return []
     
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+    # The image is already binarized, but re-applying thresholding is harmless
+    # and ensures consistency if this function is ever called directly.
+    binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)[1]
     
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours: 
@@ -274,7 +319,7 @@ def segment_lines(image_path, output_dir):
     # Split each line into cells based on horizontal gaps
     all_cells_by_row = []
     avg_char_width = np.mean([w for _, _, w, _ in word_boxes])
-    gap_threshold = avg_char_width * 2.0 # A gap of ~2.5 avg chars indicates a new column
+    gap_threshold = avg_char_width * 2.0 # A gap of ~2.0 avg chars indicates a new column
 
     for line in lines:
         if not line: continue
@@ -361,7 +406,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     return user
 
 # ------------------------------------------------------------------- #
-# --- API ENDPOINTS (UNCHANGED) ---
+# --- API ENDPOINTS ---
 # ------------------------------------------------------------------- #
 @app.post("/register", status_code=status.HTTP_201_CREATED)
 def register_user(form: OAuth2PasswordRequestForm=Depends(), db: Session=Depends(database.get_db)):
@@ -394,11 +439,21 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
 
     try:
         file_content = await file.read()
-        with open(saved_image_path, "wb") as f:
-            f.write(file_content)
+        
+        # 1. Load the original image from the uploaded file content
+        original_image_pil = Image.open(io.BytesIO(file_content)).convert("RGB")
+
+        # 2. Preprocess the image to standardize it to black text on a white background
+        print("Preprocessing image to standardize background and text color...")
+        processed_image_pil = preprocess_image_for_ocr(original_image_pil)
+        print("✅ Image preprocessing complete.")
+        
+        # 3. Save the PROCESSED image. This standardized image will now be used
+        #    by both the primary (YOLO) and fallback (contour) methods.
+        processed_image_pil.save(saved_image_path, format='PNG')
             
-        image_pil = Image.open(io.BytesIO(file_content)).convert("RGB")
-        table_result = extract_table_data_yolo(image_pil, debug_scan_dir)
+        # The rest of the logic now uses the preprocessed image
+        table_result = extract_table_data_yolo(processed_image_pil, debug_scan_dir)
 
         if table_result and table_result.get("extracted_table"):
             print("✅ Table found via YOLO! Processing as a table.")
@@ -409,6 +464,7 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
             response_data = {"extracted_text": db_text} 
         else:
             print("⚠️ No table found via YOLO. Falling back to contour-based cell segmentation.")
+            # This function reads `saved_image_path`, which now contains the processed image.
             line_result = extract_lines_data(saved_image_path, unique_filename)
             if not line_result or not line_result.get("extracted_text"):
                 raise HTTPException(status_code=400, detail="Could not detect any text in the image.")
@@ -489,5 +545,4 @@ def get_tickets(current_user: models.User = Depends(get_current_user), db: Sessi
 def read_root():
     return {"message": "Welcome to the Advanced Handwritten Scanner API"}
 
-
-# Detecting $ now...
+# Works well for colour background
