@@ -26,7 +26,7 @@ from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 from ultralytics import YOLO
 
 # Path to your custom YOLOv8 model
-YOLO_MODEL_PATH = 'best.pt' # Make sure this 'best.pt' file is in the same directory as your script
+YOLO_MODEL_PATH = 'bordered.pt'  # Custom YOLO model path
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -63,13 +63,11 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# 1. TrOCR Model
 print("Loading Hugging Face TrOCR model...")
 processor = TrOCRProcessor.from_pretrained('microsoft/trocr-large-handwritten')
 model = VisionEncoderDecoderModel.from_pretrained('microsoft/trocr-large-handwritten').to(device)
 print("✅ TrOCR model loaded successfully.")
 
-# 2. Custom YOLOv8 Model for Cell Detection
 print("Loading custom YOLOv8 model for table cell detection...")
 if not os.path.exists(YOLO_MODEL_PATH):
     print(f"❌ CRITICAL ERROR: YOLO model not found at '{YOLO_MODEL_PATH}'")
@@ -78,89 +76,91 @@ else:
     yolo_model = YOLO(YOLO_MODEL_PATH)
     print("✅ Custom YOLOv8 model loaded successfully.")
 
+
 # --------------------------------------------------------
-# To identify dollar symbol
+# --- Currency Symbol Fix ---
 # --------------------------------------------------------
 def correct_currency_symbols(text: str) -> str:
-    """
-    Corrects OCR errors where '$' is mistaken for 's' or 'S'.
-    This is safe and won't affect regular words like "is".
-    
-    Examples:
-    - "s190" -> "$190"
-    - "S 0.00" -> "$ 0.00"
-    - "is 5 dollars" -> "is 5 dollars" (No change, which is correct)
-    """
-    # This regex finds an 's' or 'S' that is at the start of a word boundary
-    # AND is followed by a digit or a decimal point (with an optional space).
-    # The (?=...) part is a "lookahead" that checks without being part of the match.
+    """Corrects common OCR misinterpretations of currency symbols."""
+    # Specifically targets 's' or 'S' when it's at the beginning of a "word"
+    # and is followed by a digit or a dot (like in $5 or $.50)
     corrected_text = re.sub(r'\b[sS](?=\s?[\d.])', '$', text)
     return corrected_text
 
+
 # ------------------------------------------------------------------- #
-# --- NEW: IMAGE PREPROCESSING ---
+# --- IMAGE PREPROCESSING (Simpler global function) ---
 # ------------------------------------------------------------------- #
 
 def preprocess_image_for_ocr(image: Image.Image) -> Image.Image:
     """
-    Converts any input image to a standardized format with a white background
-    and black text for optimal OCR performance.
-
-    Args:
-        image (Image.Image): The input PIL Image.
-
-    Returns:
-        Image.Image: The processed PIL Image with a white background and black text.
+    Converts input image to a standardized white-background,
+    black-text format using a global threshold.
     """
-    # Convert PIL Image to OpenCV format (BGR)
     open_cv_image = np.array(image.convert("RGB"))
+    # Convert RGB to BGR
     open_cv_image = open_cv_image[:, :, ::-1].copy()
 
-    # Convert to grayscale
     gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
-
-    # Apply a slight blur to reduce noise before thresholding
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Apply Otsu's thresholding to binarize the image. This automatically finds
-    # the best threshold to separate foreground and background.
+    # Global binarization
     _, binarized = cv2.threshold(
         blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
 
-    # Ensure the background is white and text is black.
-    # We check the average color of the binarized image. If the average is less
-    # than 128, it means most of the image is black (dark background),
-    # so we need to invert the colors.
+    # Global check: If the whole image is *mostly* black, invert it.
     if np.mean(binarized) < 128:
         binarized = cv2.bitwise_not(binarized)
 
-    # Convert the processed grayscale image back to an RGB PIL Image
-    # as the rest of the pipeline expects a 3-channel image.
     final_image_rgb = cv2.cvtColor(binarized, cv2.COLOR_GRAY2RGB)
     return Image.fromarray(final_image_rgb)
 
 
 # ------------------------------------------------------------------- #
-# --- TABLE DETECTION & EXTRACTION (UNCHANGED) ---
+# --- TABLE DETECTION & OCR (With per-cell fix) ---
 # ------------------------------------------------------------------- #
 
 def enhance_cell_image(cell_cv_image):
+    """
+    Enhances a single cell image and, crucially, standardizes it to
+    be BLACK TEXT on a WHITE BACKGROUND, regardless of its original format.
+    """
     if cell_cv_image.shape[0] < 10 or cell_cv_image.shape[1] < 10:
         return None
+    
     gray = cv2.cvtColor(cell_cv_image, cv2.COLOR_BGR2GRAY)
+    
+    # --- Resize and Contrast (from your original code) ---
     target_height = 64
     aspect_ratio = target_height / gray.shape[0]
     new_width = int(gray.shape[1] * aspect_ratio)
-    resized = cv2.resize(gray, (new_width, target_height), interpolation=cv2.INTER_CUBIC)
+    
+    # Use INTER_AREA for shrinking, INTER_CUBIC for enlarging
+    interp = cv2.INTER_CUBIC if aspect_ratio > 1 else cv2.INTER_AREA
+    resized = cv2.resize(gray, (new_width, target_height), interpolation=interp)
+    
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
     contrasted = clahe.apply(resized)
-    _, final_image = cv2.threshold(contrasted, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    final_image_rgb = cv2.cvtColor(final_image, cv2.COLOR_GRAY2RGB)
+    
+    # --- Binarize and Standardize Background ---
+    # Binarize the cell using Otsu's method
+    _, binarized_image = cv2.threshold(contrasted, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # **THIS IS THE FIX:**
+    # Check the average color of the final binarized cell.
+    # If it's mostly black (mean < 128), it's white-on-black.
+    # We must invert it to be black-on-white for TrOCR.
+    if np.mean(binarized_image) < 128:
+        binarized_image = cv2.bitwise_not(binarized_image)
+
+    # Convert the final standardized B&W image back to RGB
+    final_image_rgb = cv2.cvtColor(binarized_image, cv2.COLOR_GRAY2RGB)
     return Image.fromarray(final_image_rgb)
 
 
 def recognize_cell_text(cell_image: Image.Image):
+    """Runs TrOCR on a single enhanced cell PIL image."""
     if cell_image is None or cell_image.width < 5 or cell_image.height < 5:
         return ""
     try:
@@ -168,107 +168,155 @@ def recognize_cell_text(cell_image: Image.Image):
         generated_ids = model.generate(pixel_values, max_length=300)
         return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
     except Exception:
+        # Return empty string on any model error
         return ""
 
+
 def extract_table_data_yolo(image: Image.Image, debug_dir_path: str):
+    """
+    Runs YOLO to find table cells.
+    If found, extracts table text AND returns the table's overall bounding box.
+    """
     print("Running primary table extraction with YOLO...")
     if yolo_model is None:
         print("⚠️ YOLO model is not loaded. Skipping table detection.")
         return None
-    # Since the input image is already preprocessed (B&W), we use it directly.
+
+    # 1. Prepare image for YOLO
     original_image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    cv2.imwrite(os.path.join(debug_dir_path, "1_preprocessed_for_detection.png"), original_image_cv)
+    # *** GET IMAGE DIMENSIONS ***
+    h, w, _ = original_image_cv.shape 
     
+    cv2.imwrite(os.path.join(debug_dir_path, "1_preprocessed_for_detection.png"), original_image_cv)
+
+    # 2. Run YOLO detection
     print("Detecting table cells...")
-    # The preprocessed image is ideal for detection.
     results = yolo_model.predict(original_image_cv, conf=0.2, verbose=False)
-
     if not results or results[0].boxes is None or not results[0].boxes.xyxy.nelement():
-        return None
-    cell_boxes = sorted(results[0].boxes.cpu().numpy().xyxy.astype(int).tolist(), key=lambda b: (b[1], b[0]))
-    if not cell_boxes:
+        print("No cells detected by YOLO.")
         return None
 
-    print(f"Detected {len(cell_boxes)} cells. Reconstructing table structure...")
+    # 3. Get all cell boxes and determine the full table bounding box
+    cell_boxes = results[0].boxes.cpu().numpy().xyxy.astype(int).tolist()
+    if not cell_boxes:
+        print("No cell boxes in results.")
+        return None
+
+    min_x = min(b[0] for b in cell_boxes)
+    min_y = min(b[1] for b in cell_boxes)
+    max_x = max(b[2] for b in cell_boxes)
+    max_y = max(b[3] for b in cell_boxes)
+
+    # --- FIX: Add padding to the bounding box to erase the borders ---
+    # This padding expands the box to include the table borders
+    # that are likely just outside the detected cell boxes.
+    padding = 10 # 10 pixels padding. You can adjust this value if needed.
+    
+    min_x = max(0, min_x - padding)
+    min_y = max(0, min_y - padding)
+    max_x = min(w, max_x + padding) # Ensure box doesn't go out of image width
+    max_y = min(h, max_y + padding) # Ensure box doesn't go out of image height
+    # --- End Fix ---
+    
+    table_bbox = [min_x, min_y, max_x, max_y]
+    
+    # 4. Sort cells into rows for extraction
+    sorted_cell_boxes = sorted(cell_boxes, key=lambda b: (b[1], b[0]))
+    print(f"Detected {len(sorted_cell_boxes)} cells. Reconstructing table structure...")
+    
     rows = []
     current_row = []
-    if cell_boxes:
-        ref_y = cell_boxes[0][1]
-        cell_height = cell_boxes[0][3] - cell_boxes[0][1]
-        for box in cell_boxes:
-            if box[1] > ref_y + cell_height * 0.8:
+    if sorted_cell_boxes:
+        ref_y = sorted_cell_boxes[0][1]
+        # Use a dynamic cell height threshold
+        avg_cell_height = np.mean([b[3] - b[1] for b in sorted_cell_boxes])
+        
+        for box in sorted_cell_boxes:
+            # If the box's top is significantly lower than the current row's ref_y
+            if box[1] > ref_y + avg_cell_height * 0.8:
                 rows.append(sorted(current_row, key=lambda b: b[0]))
                 current_row = [box]
                 ref_y = box[1]
             else:
                 current_row.append(box)
-        rows.append(sorted(current_row, key=lambda b: b[0]))
+        rows.append(sorted(current_row, key=lambda b: b[0])) # Add the last row
 
+    # 5. Perform OCR on each cell
     table_data = []
     print("Enhancing and performing OCR on detected cells...")
     draw_img = image.copy()
     draw = ImageDraw.Draw(draw_img)
 
-    for i, row_boxes in enumerate(tqdm(rows, desc="Reading Rows")):
+    for i, row_boxes in enumerate(tqdm(rows, desc="Reading Table Rows")):
         row_text = []
         for j, box in enumerate(row_boxes):
             x1, y1, x2, y2 = box
-            padding = 2
-            # Crop from the preprocessed image passed to this function
+            # Use a small padding
+            cell_padding = 2
             cell_image_cv = original_image_cv[
-                max(0, y1 - padding):min(original_image_cv.shape[0], y2 + padding),
-                max(0, x1 - padding):min(original_image_cv.shape[1], x2 + padding)
+                max(0, y1 - cell_padding):min(original_image_cv.shape[0], y2 + cell_padding),
+                max(0, x1 - cell_padding):min(original_image_cv.shape[1], x2 + cell_padding)
             ]
+            
+            # This now applies the per-cell inversion fix
             enhanced_cell_pil = enhance_cell_image(cell_image_cv)
+            
             if enhanced_cell_pil:
                 enhanced_cell_pil.save(os.path.join(debug_dir_path, f"cell_{i:02d}_{j:02d}.png"))
+            
             draw.rectangle([x1, y1, x2, y2], outline="red", width=1)
             raw_text = recognize_cell_text(enhanced_cell_pil)
             row_text.append(raw_text)
         table_data.append(row_text)
 
     draw_img.save(os.path.join(debug_dir_path, "2_detected_cells.png"))
-    return {"extracted_table": table_data, "debug_output_path": debug_dir_path}
+    
+    # 6. Return both the extracted data and the table's bounding box
+    return {
+        "extracted_table": table_data,
+        "table_bbox": table_bbox, # This is now the *padded* box
+        "debug_output_path": debug_dir_path
+    }
+
 
 # ------------------------------------------------------------------- #
-# --- MODIFIED CELL SEGMENTATION (FALLBACK LOGIC) ---
+# --- MODIFIED CELL SEGMENTATION (FALLBACK/HYBRID LOGIC) ---
 # ------------------------------------------------------------------- #
 
 def extract_lines_data(image_path: str, unique_filename: str):
     """
-    Manages the fallback process: segments image into cells, recognizes text in each,
-    and formats the result as a table-like string.
+    Manages the contour-based process: segments image into cells, recognizes text
+    in each, and returns structured data with Y-coordinates.
     """
     scan_temp_dir = os.path.join(TEMP_LINES_DIR, unique_filename)
     os.makedirs(scan_temp_dir, exist_ok=True)
     try:
-        # segment_lines returns a 2D list of cell image paths (rows of cells)
-        cell_image_paths_by_row = segment_lines(image_path, scan_temp_dir)
-        if not cell_image_paths_by_row: 
+        # segment_lines now returns a list of:
+        # [{"paths": [cell_path_1, ...], "y": line_y_coordinate}, ...]
+        cell_data_by_row = segment_lines(image_path, scan_temp_dir)
+        if not cell_data_by_row: 
             return None
         
-        # 1. Calculate the total number of cells for an accurate progress bar
-        total_cells = sum(len(row) for row in cell_image_paths_by_row)
-        print(f"Fallback OCR started on {len(cell_image_paths_by_row)} rows ({total_cells} cells)...")
+        total_cells = sum(len(row["paths"]) for row in cell_data_by_row)
+        print(f"Contour OCR started on {len(cell_data_by_row)} lines ({total_cells} cells)...")
 
-        table_data = []
+        all_extracted_lines = []
         
-        # 2. Create a tqdm progress bar instance
-        with tqdm(total=total_cells, desc="Reading Cells (Fallback)") as pbar:
-            # 3. Loop through each row and each cell to process them
-            for row_paths in cell_image_paths_by_row:
+        with tqdm(total=total_cells, desc="Reading Cells (Contour)") as pbar:
+            for row_data in cell_data_by_row:
                 row_text = []
-                for cell_path in row_paths:
-                    # Recognize text for a single cell
+                for cell_path in row_data["paths"]:
                     text = recognize_line(cell_path)
                     row_text.append(text)
-                    # 4. Update the progress bar after each cell is done
                     pbar.update(1)
-                table_data.append(row_text)
+                
+                # Store the text row with its original Y-coordinate
+                all_extracted_lines.append({
+                    "row_text": row_text,
+                    "y": row_data["y"]
+                })
 
-        # Format the output to be consistent with the YOLO extractor
-        table_string = "\n".join([" | ".join(map(str, row)) for row in table_data])
-        return {"extracted_text": table_string}
+        return {"all_lines": all_extracted_lines}
     finally:
         if os.path.exists(scan_temp_dir): 
             shutil.rmtree(scan_temp_dir)
@@ -276,18 +324,17 @@ def extract_lines_data(image_path: str, unique_filename: str):
 def segment_lines(image_path, output_dir):
     """
     Segments an image into lines and then splits those lines into cells based on
-    horizontal spacing. This is for borderless tables.
-    Returns a 2D list of cropped cell image paths.
+    horizontal spacing.
+    Returns a list of dicts: [{"paths": [cell_paths], "y": line_y}, ...]
     """
-    # This function now receives the path to the already preprocessed image
     image = cv2.imread(image_path)
     if image is None: 
         return []
     
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    # The image is already binarized, but re-applying thresholding is harmless
-    # and ensures consistency if this function is ever called directly.
-    binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)[1]
+    # Image is already binarized from preprocess_image_for_ocr
+    # We threshold to find contours (black text on white bg)
+    binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)[1]
     
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours: 
@@ -297,71 +344,90 @@ def segment_lines(image_path, output_dir):
     if not word_boxes: 
         return []
             
-    # Group word boxes into lines based on vertical position
     word_boxes.sort(key=lambda b: b[1]) # Sort by y-coordinate
     
-    lines = []
+    lines_data = [] # Will store {"boxes": [...], "y": ...}
     current_line = []
     if word_boxes:
         current_line.append(word_boxes[0])
-        avg_height = np.mean([h for _, _, _, h in word_boxes])
+        # Calculate avg_height from a sample for robustness
+        sample_heights = [h for _, _, _, h in word_boxes[:50]]
+        avg_height = np.mean(sample_heights) if sample_heights else 20 # Default
 
         for box in word_boxes[1:]:
-            last_box = current_line[-1]
-            # If the vertical center of the new box is close to the last one, it's on the same line
-            if abs((box[1] + box[3] / 2) - (last_box[1] + last_box[3] / 2)) < avg_height * 0.7:
+            last_box_y_center = current_line[-1][1] + current_line[-1][3] / 2
+            current_box_y_center = box[1] + box[3] / 2
+            
+            if abs(current_box_y_center - last_box_y_center) < avg_height * 0.7:
                 current_line.append(box)
             else:
-                lines.append(sorted(current_line, key=lambda b: b[0]))
+                sorted_line_boxes = sorted(current_line, key=lambda b: b[0])
+                lines_data.append({"boxes": sorted_line_boxes, "y": sorted_line_boxes[0][1]})
                 current_line = [box]
-        lines.append(sorted(current_line, key=lambda b: b[0]))
         
+        # Add the last line
+        if current_line:
+            sorted_line_boxes = sorted(current_line, key=lambda b: b[0])
+            lines_data.append({"boxes": sorted_line_boxes, "y": sorted_line_boxes[0][1]})
+            
     # Split each line into cells based on horizontal gaps
-    all_cells_by_row = []
-    avg_char_width = np.mean([w for _, _, w, _ in word_boxes])
-    gap_threshold = avg_char_width * 2.0 # A gap of ~2.0 avg chars indicates a new column
+    all_lines_data = [] # Will store {"line_cell_boxes": [...], "y": ...}
+    
+    # Calculate gap threshold based on average character width
+    all_widths = [w for _, _, w, h in word_boxes if h > avg_height * 0.5]
+    avg_char_width = np.mean(all_widths) if all_widths else 10 # Default
+    gap_threshold = avg_char_width * 2.0 
 
-    for line in lines:
+    for line_data in lines_data:
+        line = line_data["boxes"]
+        line_y = line_data["y"]
         if not line: continue
         
-        cells_in_line = []
-        current_cell = [line[0]]
+        cells_in_line = [] # This will be a list of [cell[word_box]]
+        current_cell_boxes = [line[0]] # A cell is a list of word boxes
         
         for i in range(len(line) - 1):
             current_word_box = line[i]
             next_word_box = line[i+1]
+            # Gap is from end of current word to start of next word
             gap = next_word_box[0] - (current_word_box[0] + current_word_box[2])
             
             if gap > gap_threshold:
-                cells_in_line.append(current_cell)
-                current_cell = [next_word_box]
+                # End of a cell
+                cells_in_line.append(current_cell_boxes)
+                current_cell_boxes = [next_word_box] # Start new cell
             else:
-                current_cell.append(next_word_box)
+                # Word is part of the same cell
+                current_cell_boxes.append(next_word_box)
         
-        cells_in_line.append(current_cell)
-        all_cells_by_row.append(cells_in_line)
+        cells_in_line.append(current_cell_boxes) # Add the last cell
+        all_lines_data.append({"line_cell_boxes": cells_in_line, "y": line_y})
         
-    return crop_and_save_cells(image, all_cells_by_row, output_dir)
+    return crop_and_save_cells(image, all_lines_data, output_dir)
 
-def crop_and_save_cells(image, rows_of_cells, output_dir):
+def crop_and_save_cells(image, all_lines_data, output_dir):
     """
     Crops and saves each detected cell.
-    'rows_of_cells' is a 3D list: [row[cell[word_box]]].
-    Returns a 2D list of paths: [row[cell_path]].
+    'all_lines_data' is a list of: [{"line_cell_boxes": [cell[word_box]], "y": line_y}]
+    Returns a list of: [{"paths": [cell_path], "y": line_y}]
     """
-    row_paths = []
+    final_lines = []
     padding = 10
     
-    for i, row in enumerate(rows_of_cells):
+    for i, line_data in enumerate(all_lines_data):
         cell_paths_in_row = []
-        for j, cell_boxes in enumerate(row):
+        line_y = line_data["y"]
+        
+        for j, cell_boxes in enumerate(line_data["line_cell_boxes"]):
             if not cell_boxes: continue
             
+            # Combine all word boxes in this cell to get one bounding box
             x_min = min(b[0] for b in cell_boxes)
             y_min = min(b[1] for b in cell_boxes)
             x_max = max(b[0] + b[2] for b in cell_boxes)
             y_max = max(b[1] + b[3] for b in cell_boxes)
             
+            # Apply padding
             y1, y2 = max(0, y_min - padding), min(image.shape[0], y_max + padding)
             x1, x2 = max(0, x_min - padding), min(image.shape[1], x_max + padding)
             
@@ -372,14 +438,15 @@ def crop_and_save_cells(image, rows_of_cells, output_dir):
                 cell_paths_in_row.append(cell_path)
         
         if cell_paths_in_row:
-            row_paths.append(cell_paths_in_row)
+            final_lines.append({"paths": cell_paths_in_row, "y": line_y})
             
-    return row_paths
+    return final_lines
 
 def recognize_line(image_path):
     """Recognizes text from a single cropped image path."""
     try:
         image = Image.open(image_path).convert("RGB")
+        # Reuse the main model processor and model
         pixel_values = processor(images=image, return_tensors="pt").pixel_values.to(device)
         generated_ids = model.generate(pixel_values, max_length=100)
         return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
@@ -440,44 +507,87 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
     try:
         file_content = await file.read()
         
-        # 1. Load the original image from the uploaded file content
+        # 1. Load and preprocess the original image
         original_image_pil = Image.open(io.BytesIO(file_content)).convert("RGB")
-
-        # 2. Preprocess the image to standardize it to black text on a white background
         print("Preprocessing image to standardize background and text color...")
         processed_image_pil = preprocess_image_for_ocr(original_image_pil)
         print("✅ Image preprocessing complete.")
         
-        # 3. Save the PROCESSED image. This standardized image will now be used
-        #    by both the primary (YOLO) and fallback (contour) methods.
+        # 2. Save the fully preprocessed image (this is what the contour model will use)
         processed_image_pil.save(saved_image_path, format='PNG')
             
-        # The rest of the logic now uses the preprocessed image
+        # 3. --- HYBRID LOGIC ---
+        # Try to find a bordered table first using YOLO
+        # This function now returns the *padded* bbox
         table_result = extract_table_data_yolo(processed_image_pil, debug_scan_dir)
+        
+        image_for_contours = processed_image_pil.copy()
+        table_data = None
+        table_y_start = float('inf') # Position where the table begins
 
-        if table_result and table_result.get("extracted_table"):
-            print("✅ Table found via YOLO! Processing as a table.")
-            table_string = "\n".join([" | ".join(map(str, row)) for row in table_result["extracted_table"]])
-            db_text = table_string
-            db_text = correct_currency_symbols(db_text)
-            # Only include the text, as the frontend will format it
-            response_data = {"extracted_text": db_text} 
+        if table_result:
+            print("✅ Table found via YOLO! Will combine with other text.")
+            table_data = table_result["extracted_table"]
+            table_bbox = table_result["table_bbox"] # This is the padded box
+            table_y_start = table_bbox[1]
+            
+            # Erase the table area from the image that will be sent
+            # to the contour-based extractor. This now erases the borders too.
+            draw = ImageDraw.Draw(image_for_contours)
+            draw.rectangle(table_bbox, fill="white")
+            image_for_contours.save(os.path.join(debug_scan_dir, "3_erased_table.png"))
         else:
-            print("⚠️ No table found via YOLO. Falling back to contour-based cell segmentation.")
-            # This function reads `saved_image_path`, which now contains the processed image.
-            line_result = extract_lines_data(saved_image_path, unique_filename)
-            if not line_result or not line_result.get("extracted_text"):
-                raise HTTPException(status_code=400, detail="Could not detect any text in the image.")
-            print("✅ Fallback processing successful.")
-            db_text = line_result["extracted_text"]
-            db_text = correct_currency_symbols(db_text)
-            response_data = line_result
+            print("⚠️ No table found via YOLO. Processing full page with contour-based segmentation.")
 
+        # 4. Always run contour-based extraction on the (potentially modified) image
+        # We need to save this "erased" image temporarily so extract_lines_data can read it
+        temp_contour_path = os.path.join(debug_scan_dir, "temp_for_contours.png")
+        image_for_contours.save(temp_contour_path, format='PNG')
+        
+        line_result = extract_lines_data(temp_contour_path, unique_filename)
+        
+        contour_lines = []
+        if not line_result or not line_result.get("all_lines"):
+            if table_data:
+                print("⚠️ Contour extraction failed, but YOLO found a table. Saving table data only.")
+            else:
+                # Only raise error if BOTH methods failed
+                raise HTTPException(status_code=400, detail="Could not detect any text in the image.")
+        else:
+            print(f"✅ Contour extraction found {len(line_result['all_lines'])} lines of text.")
+            contour_lines = line_result["all_lines"] # List of {"row_text": [...], "y": ...}
+
+        # 5. Combine the results in the correct order
+        final_data_rows = []
+        table_inserted = False
+
+        for line in contour_lines:
+            # If we hit the table's Y-position, insert the table data first
+            if not table_inserted and table_data and line["y"] >= table_y_start:
+                final_data_rows.extend(table_data)
+                table_inserted = True
+            
+            # Add the text line from the contour extraction
+            final_data_rows.append(line["row_text"])
+
+        # If the table was at the very end (or contour scan was empty)
+        if not table_inserted and table_data:
+            final_data_rows.extend(table_data)
+
+        if not final_data_rows:
+            raise HTTPException(status_code=400, detail="Text extraction resulted in empty content.")
+
+        # 6. Format and save to DB
+        db_text = "\n".join([" | ".join(map(str, row)) for row in final_data_rows])
+        db_text = correct_currency_symbols(db_text)
+        
+        # The final response data
+        response_data = {"extracted_text": db_text}
+        
         image_url_path = f"/{TICKETS_DIR}/{unique_filename}"
         new_ticket = models.Ticket(extracted_text=db_text, owner_id=current_user.id, image_path=image_url_path)
         db.add(new_ticket); db.commit(); db.refresh(new_ticket)
         
-        # Add ticket id and image url to the final response
         response_data["image_url"] = image_url_path
         response_data["ticket_id"] = new_ticket.id
         return {"filename": file.filename, **response_data}
@@ -485,10 +595,10 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
     except Exception as e:
         if isinstance(e, HTTPException): raise e
         print(f"An unexpected error occurred: {str(e)}")
+        # You might want to log the full traceback here
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
     finally:
-        # Keep debug directory for inspection, remove the 'finally' block if you want it deleted
-        pass
+        # Clean up the temporary debug directory for this scan
         if os.path.exists(debug_scan_dir):
             try:
                 shutil.rmtree(debug_scan_dir)
@@ -514,7 +624,7 @@ def update_ticket_text(
     if not ticket:
         print(f"❌ Ticket {ticket_id} not found for user {current_user.id}")
         raise HTTPException(status_code=404, detail="Ticket not found")
-    print(f"📝 Updating ticket {ticket_id} text to: {new_text}")
+    print(f"📝 Updating ticket {ticket_id} text to: {new_text[:100]}...")
     ticket.extracted_text = new_text
     db.commit()
     db.refresh(ticket)
@@ -526,7 +636,7 @@ def update_ticket_text(
             "image_url": ticket.image_path
         }
     }
-    print(f"✅ Update successful: {response_data}")
+    print(f"✅ Update successful for ticket {ticket_id}")
     return response_data
 
 @app.get("/tickets")
@@ -545,4 +655,15 @@ def get_tickets(current_user: models.User = Depends(get_current_user), db: Sessi
 def read_root():
     return {"message": "Welcome to the Advanced Handwritten Scanner API"}
 
-# Works well for colour background
+# Example for running with uvicorn (if you run this file directly)
+if __name__ == "__main__":
+    import uvicorn
+    print("--- Starting FastAPI Server ---")
+    print(f"YOLO Model: {YOLO_MODEL_PATH} ({'LOADED' if yolo_model else 'NOT FOUND'})")
+    print(f"TrOCR Model: microsoft/trocr-large-handwritten (LOADED)")
+    print(f"Using Device: {device}")
+    print("---------------------------------")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+#Almost completed extraction logic with YOLO and contour fallback.
