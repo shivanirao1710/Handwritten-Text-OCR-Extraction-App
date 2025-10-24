@@ -81,11 +81,25 @@ else:
 # --- Currency Symbol Fix ---
 # --------------------------------------------------------
 def correct_currency_symbols(text: str) -> str:
-    """Corrects common OCR misinterpretations of currency symbols."""
-    # Specifically targets 's' or 'S' when it's at the beginning of a "word"
-    # and is followed by a digit or a dot (like in $5 or $.50)
-    corrected_text = re.sub(r'\b[sS](?=\s?[\d.])', '$', text)
-    return corrected_text
+    """
+    Corrects common OCR misinterpretations of currency symbols like:
+    - S10, s.50, s0.00, so.00 → $10, $.50, $0.00, $0.00
+    - 5o.00, 5O.00, 5 10 → $0.00, $10
+    """
+
+    # 1️⃣ Replace 's' or 'S' (possibly followed by o or 0) before digits or dots with $
+    text = re.sub(r'\b[sS][oO0]?(?=\s?[\d.])', '$', text)
+
+    # 2️⃣ Replace '5' at the start of a number block (common $ misread)
+    # Example: '5o.00' or '5 10' → '$0.00' / '$10'
+    text = re.sub(r'\b5\s?([0-9oO.]+)', 
+                  lambda m: '$' + m.group(1).replace('o', '0').replace('O', '0'),
+                  text)
+
+    # 3️⃣ Replace 'o' or 'O' inside numbers with '0'
+    text = re.sub(r'(?<=\d)[oO](?=\d)', '0', text)
+
+    return text
 
 
 # ------------------------------------------------------------------- #
