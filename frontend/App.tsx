@@ -32,7 +32,7 @@ export default function App() {
   const [editedText, setEditedText] = useState('');
   const [isUpdating, setIsUpdating] = useState(false);
 
-  const API_BASE_URL = 'https://45d89577c5ae.ngrok-free.app';
+  const API_BASE_URL = 'https://774d55eedc66.ngrok-free.app';
 
   // --- API & Event Handlers ---
 
