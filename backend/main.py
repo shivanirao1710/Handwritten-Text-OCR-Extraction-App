@@ -1,7 +1,6 @@
 import io
 import os
 import shutil
-import json
 from PIL import Image, ImageDraw
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,6 +99,7 @@ def correct_currency_symbols(text: str) -> str:
     text = re.sub(r'(?<=\d)[oO](?=\d)', '0', text)
 
     return text
+
 
 
 # ------------------------------------------------------------------- #
@@ -532,7 +532,6 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
             
         # 3. --- HYBRID LOGIC ---
         # Try to find a bordered table first using YOLO
-        # This function now returns the *padded* bbox
         table_result = extract_table_data_yolo(processed_image_pil, debug_scan_dir)
         
         image_for_contours = processed_image_pil.copy()
@@ -545,8 +544,6 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
             table_bbox = table_result["table_bbox"] # This is the padded box
             table_y_start = table_bbox[1]
             
-            # Erase the table area from the image that will be sent
-            # to the contour-based extractor. This now erases the borders too.
             draw = ImageDraw.Draw(image_for_contours)
             draw.rectangle(table_bbox, fill="white")
             image_for_contours.save(os.path.join(debug_scan_dir, "3_erased_table.png"))
@@ -554,7 +551,6 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
             print("⚠️ No table found via YOLO. Processing full page with contour-based segmentation.")
 
         # 4. Always run contour-based extraction on the (potentially modified) image
-        # We need to save this "erased" image temporarily so extract_lines_data can read it
         temp_contour_path = os.path.join(debug_scan_dir, "temp_for_contours.png")
         image_for_contours.save(temp_contour_path, format='PNG')
         
@@ -565,7 +561,6 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
             if table_data:
                 print("⚠️ Contour extraction failed, but YOLO found a table. Saving table data only.")
             else:
-                # Only raise error if BOTH methods failed
                 raise HTTPException(status_code=400, detail="Could not detect any text in the image.")
         else:
             print(f"✅ Contour extraction found {len(line_result['all_lines'])} lines of text.")
@@ -576,49 +571,57 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
         table_inserted = False
 
         for line in contour_lines:
-            # If we hit the table's Y-position, insert the table data first
             if not table_inserted and table_data and line["y"] >= table_y_start:
                 final_data_rows.extend(table_data)
                 table_inserted = True
             
-            # Add the text line from the contour extraction
             final_data_rows.append(line["row_text"])
 
-        # If the table was at the very end (or contour scan was empty)
         if not table_inserted and table_data:
             final_data_rows.extend(table_data)
 
         if not final_data_rows:
             raise HTTPException(status_code=400, detail="Text extraction resulted in empty content.")
 
-        # 6. Format and save to DB
-        db_text = "\n".join([" | ".join(map(str, row)) for row in final_data_rows])
-        db_text = correct_currency_symbols(db_text)
+        # ------------------- START: MODIFIED STEP 6 ------------------- #
         
-        # The final response data
-        response_data = {"extracted_text": db_text}
+        # 6. Format for JSON response AND database
         
+        # Create a JSON-friendly list and apply corrections cell by cell
+        json_output_rows = []
+        for row in final_data_rows:
+            # Apply correction to each cell in the row
+            corrected_row = [correct_currency_symbols(str(cell)) for cell in row]
+            json_output_rows.append(corrected_row)
+
+        # Create the flat string *for the database* (using the corrected rows)
+        db_text = "\n".join([" | ".join(row) for row in json_output_rows])
+        
+        # The final response data now contains the JSON list
+        response_data = {"extracted_text": json_output_rows}
+        
+        # Save the *flat string* to the DB
         image_url_path = f"/{TICKETS_DIR}/{unique_filename}"
         new_ticket = models.Ticket(extracted_text=db_text, owner_id=current_user.id, image_path=image_url_path)
         db.add(new_ticket); db.commit(); db.refresh(new_ticket)
         
         response_data["image_url"] = image_url_path
         response_data["ticket_id"] = new_ticket.id
+        
+        # -------------------- END: MODIFIED STEP 6 -------------------- #
+
         return {"filename": file.filename, **response_data}
 
     except Exception as e:
         if isinstance(e, HTTPException): raise e
         print(f"An unexpected error occurred: {str(e)}")
-        # You might want to log the full traceback here
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
     finally:
-        # Clean up the temporary debug directory for this scan
         if os.path.exists(debug_scan_dir):
             try:
                 shutil.rmtree(debug_scan_dir)
             except OSError as e:
                 print(f"Error removing debug directory {debug_scan_dir}: {e.strerror}")
-
 
 @app.post("/update-ticket-text")
 def update_ticket_text(
@@ -680,4 +683,4 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
 
-#Almost completed extraction logic with YOLO and contour fallback.
+# JSON format
