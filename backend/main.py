@@ -63,8 +63,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 print("Loading Hugging Face TrOCR model...")
-processor = TrOCRProcessor.from_pretrained('ocr_model')   # or use microsoft/trocr-large-handwritten 
-model = VisionEncoderDecoderModel.from_pretrained('ocr_model').to(device)
+processor = TrOCRProcessor.from_pretrained('microsoft/trocr-large-handwritten')   # or use microsoft/trocr-large-handwritten 
+model = VisionEncoderDecoderModel.from_pretrained('microsoft/trocr-large-handwritten').to(device)
 print("✅ TrOCR model loaded successfully.")
 
 print("Loading custom YOLOv8 model for table cell detection...")
