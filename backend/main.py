@@ -63,8 +63,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 print("Loading Hugging Face TrOCR model...")
-processor = TrOCRProcessor.from_pretrained('microsoft/trocr-large-handwritten')
-model = VisionEncoderDecoderModel.from_pretrained('microsoft/trocr-large-handwritten').to(device)
+processor = TrOCRProcessor.from_pretrained('ocr_model')   # microsoft/trocr-large-handwritten 
+model = VisionEncoderDecoderModel.from_pretrained('ocr_model').to(device)
 print("✅ TrOCR model loaded successfully.")
 
 print("Loading custom YOLOv8 model for table cell detection...")
@@ -103,13 +103,13 @@ def correct_currency_symbols(text: str) -> str:
 
 
 # ------------------------------------------------------------------- #
-# --- IMAGE PREPROCESSING (Simpler global function) ---
+# --- IMAGE PREPROCESSING (NOW SPLIT INTO TWO FUNCTIONS) ---
 # ------------------------------------------------------------------- #
 
-def preprocess_image_for_ocr(image: Image.Image) -> Image.Image:
+def basic_preprocess(image: Image.Image) -> Image.Image:
     """
     Converts input image to a standardized white-background,
-    black-text format using a global threshold.
+    black-text format. DOES NOT remove lines.
     """
     open_cv_image = np.array(image.convert("RGB"))
     # Convert RGB to BGR
@@ -123,34 +123,86 @@ def preprocess_image_for_ocr(image: Image.Image) -> Image.Image:
         blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
 
-    # Global check: If the whole image is *mostly* black, invert it.
+    # Global check: Standardize to BLACK text (0) on WHITE background (255)
     if np.mean(binarized) < 128:
+        # It's white text on black bg, invert it
         binarized = cv2.bitwise_not(binarized)
 
     final_image_rgb = cv2.cvtColor(binarized, cv2.COLOR_GRAY2RGB)
     return Image.fromarray(final_image_rgb)
 
+def remove_lines(image: Image.Image) -> Image.Image:
+    """
+    Takes a pre-processed (black text on white bg) PIL image
+    and removes horizontal and vertical lines.
+    Returns a new line-removed PIL image.
+    """
+    # Convert PIL Image to OpenCV format (BGR)
+    binarized = np.array(image.convert("L"))
+
+    # We must invert it to (white text on black bg) for morphological operations.
+    inverted_binarized = cv2.bitwise_not(binarized)
+
+    # --- Detect horizontal lines ---
+    h_kernel_width = max(50, binarized.shape[1] // 30)
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_kernel_width, 1))
+    
+    detected_horizontal_lines = cv2.morphologyEx(
+        inverted_binarized, cv2.MORPH_OPEN, horizontal_kernel, iterations=2
+    )
+    
+    dilated_horizontal_lines = cv2.dilate(
+        detected_horizontal_lines, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1
+    )
+
+    # --- Detect vertical lines ---
+    v_kernel_height = max(50, binarized.shape[0] // 30)
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_kernel_height))
+    
+    detected_vertical_lines = cv2.morphologyEx(
+        inverted_binarized, cv2.MORPH_OPEN, vertical_kernel, iterations=2
+    )
+    
+    dilated_vertical_lines = cv2.dilate(
+        detected_vertical_lines, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1
+    )
+
+    # --- Combine and remove lines ---
+    all_lines_mask = cv2.add(dilated_horizontal_lines, dilated_vertical_lines)
+    
+    cleaned_inverted = cv2.subtract(inverted_binarized, all_lines_mask)
+    
+    # Invert back to black text on white background
+    final_binarized = cv2.bitwise_not(cleaned_inverted)
+
+    final_image_rgb = cv2.cvtColor(final_binarized, cv2.COLOR_GRAY2RGB)
+    return Image.fromarray(final_image_rgb)
+
 
 # ------------------------------------------------------------------- #
-# --- TABLE DETECTION & OCR (With per-cell fix) ---
+# --- TABLE DETECTION & OCR (MODIFIED) ---
 # ------------------------------------------------------------------- #
 
 def enhance_cell_image(cell_cv_image):
     """
     Enhances a single cell image and, crucially, standardizes it to
     be BLACK TEXT on a WHITE BACKGROUND, regardless of its original format.
+    
+    NOTE: This now runs on a cell that has *already* had lines removed.
     """
     if cell_cv_image.shape[0] < 10 or cell_cv_image.shape[1] < 10:
         return None
     
-    gray = cv2.cvtColor(cell_cv_image, cv2.COLOR_BGR2GRAY)
-    
-    # --- Resize and Contrast (from your original code) ---
+    if len(cell_cv_image.shape) == 3 and cell_cv_image.shape[2] == 3:
+        gray = cv2.cvtColor(cell_cv_image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = cell_cv_image # Assume it's already grayscale
+
+    # --- Resize and Contrast ---
     target_height = 64
     aspect_ratio = target_height / gray.shape[0]
     new_width = int(gray.shape[1] * aspect_ratio)
     
-    # Use INTER_AREA for shrinking, INTER_CUBIC for enlarging
     interp = cv2.INTER_CUBIC if aspect_ratio > 1 else cv2.INTER_AREA
     resized = cv2.resize(gray, (new_width, target_height), interpolation=interp)
     
@@ -158,17 +210,11 @@ def enhance_cell_image(cell_cv_image):
     contrasted = clahe.apply(resized)
     
     # --- Binarize and Standardize Background ---
-    # Binarize the cell using Otsu's method
     _, binarized_image = cv2.threshold(contrasted, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    # **THIS IS THE FIX:**
-    # Check the average color of the final binarized cell.
-    # If it's mostly black (mean < 128), it's white-on-black.
-    # We must invert it to be black-on-white for TrOCR.
     if np.mean(binarized_image) < 128:
         binarized_image = cv2.bitwise_not(binarized_image)
 
-    # Convert the final standardized B&W image back to RGB
     final_image_rgb = cv2.cvtColor(binarized_image, cv2.COLOR_GRAY2RGB)
     return Image.fromarray(final_image_rgb)
 
@@ -182,26 +228,26 @@ def recognize_cell_text(cell_image: Image.Image):
         generated_ids = model.generate(pixel_values, max_length=300)
         return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
     except Exception:
-        # Return empty string on any model error
         return ""
 
 
 def extract_table_data_yolo(image: Image.Image, debug_dir_path: str):
     """
-    Runs YOLO to find table cells.
-    If found, extracts table text AND returns the table's overall bounding box.
+    Runs YOLO to find table cells on the input image (which has lines).
+    Then, it removes lines from the image to extract clean cell text.
+    
+    'image' is the PIL Image from basic_preprocess (lines INCLUDED).
     """
-    print("Running primary table extraction with YOLO...")
+    print("Running primary table extraction with YOLO (on line-included image)...")
     if yolo_model is None:
         print("⚠️ YOLO model is not loaded. Skipping table detection.")
         return None
 
-    # 1. Prepare image for YOLO
+    # 1. Prepare image for YOLO (lines included)
     original_image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    # *** GET IMAGE DIMENSIONS ***
     h, w, _ = original_image_cv.shape 
     
-    cv2.imwrite(os.path.join(debug_dir_path, "1_preprocessed_for_detection.png"), original_image_cv)
+    cv2.imwrite(os.path.join(debug_dir_path, "1_image_for_yolo_detection.png"), original_image_cv)
 
     # 2. Run YOLO detection
     print("Detecting table cells...")
@@ -221,16 +267,11 @@ def extract_table_data_yolo(image: Image.Image, debug_dir_path: str):
     max_x = max(b[2] for b in cell_boxes)
     max_y = max(b[3] for b in cell_boxes)
 
-    # --- FIX: Add padding to the bounding box to erase the borders ---
-    # This padding expands the box to include the table borders
-    # that are likely just outside the detected cell boxes.
-    padding = 10 # 10 pixels padding. You can adjust this value if needed.
-    
+    padding = 10 
     min_x = max(0, min_x - padding)
     min_y = max(0, min_y - padding)
-    max_x = min(w, max_x + padding) # Ensure box doesn't go out of image width
-    max_y = min(h, max_y + padding) # Ensure box doesn't go out of image height
-    # --- End Fix ---
+    max_x = min(w, max_x + padding)
+    max_y = min(h, max_y + padding)
     
     table_bbox = [min_x, min_y, max_x, max_y]
     
@@ -242,37 +283,48 @@ def extract_table_data_yolo(image: Image.Image, debug_dir_path: str):
     current_row = []
     if sorted_cell_boxes:
         ref_y = sorted_cell_boxes[0][1]
-        # Use a dynamic cell height threshold
         avg_cell_height = np.mean([b[3] - b[1] for b in sorted_cell_boxes])
         
         for box in sorted_cell_boxes:
-            # If the box's top is significantly lower than the current row's ref_y
             if box[1] > ref_y + avg_cell_height * 0.8:
                 rows.append(sorted(current_row, key=lambda b: b[0]))
                 current_row = [box]
                 ref_y = box[1]
             else:
                 current_row.append(box)
-        rows.append(sorted(current_row, key=lambda b: b[0])) # Add the last row
+        rows.append(sorted(current_row, key=lambda b: b[0]))
 
-    # 5. Perform OCR on each cell
+    # --- START: NEW LOGIC ---
+    # 5. Create a line-removed version of the image *for cell extraction*
+    print("Removing lines from table area for accurate cell OCR...")
+    cleaned_pil_image = remove_lines(image) # 'image' is the input PIL
+    
+    # --- THIS IS THE FIX ---
+    # Convert the 3-channel RGB PIL image to a 3-channel BGR OpenCV image
+    cleaned_image_cv = cv2.cvtColor(np.array(cleaned_pil_image), cv2.COLOR_RGB2BGR)
+    # --- END OF FIX ---
+    
+    cv2.imwrite(os.path.join(debug_dir_path, "2_image_for_cell_extraction.png"), cleaned_image_cv)
+    # --- END: NEW LOGIC ---
+
+    # 6. Perform OCR on each cell, cropping from the CLEANED image
     table_data = []
-    print("Enhancing and performing OCR on detected cells...")
-    draw_img = image.copy()
+    print("Enhancing and performing OCR on detected cells (from cleaned image)...")
+    draw_img = image.copy() # We still draw boxes on the original for debug
     draw = ImageDraw.Draw(draw_img)
 
     for i, row_boxes in enumerate(tqdm(rows, desc="Reading Table Rows")):
         row_text = []
         for j, box in enumerate(row_boxes):
             x1, y1, x2, y2 = box
-            # Use a small padding
             cell_padding = 2
-            cell_image_cv = original_image_cv[
-                max(0, y1 - cell_padding):min(original_image_cv.shape[0], y2 + cell_padding),
-                max(0, x1 - cell_padding):min(original_image_cv.shape[1], x2 + cell_padding)
+            
+            # ***CRITICAL CHANGE***: Crop from 'cleaned_image_cv', not 'original_image_cv'
+            cell_image_cv = cleaned_image_cv[
+                max(0, y1 - cell_padding):min(cleaned_image_cv.shape[0], y2 + cell_padding),
+                max(0, x1 - cell_padding):min(cleaned_image_cv.shape[1], x2 + cell_padding)
             ]
             
-            # This now applies the per-cell inversion fix
             enhanced_cell_pil = enhance_cell_image(cell_image_cv)
             
             if enhanced_cell_pil:
@@ -283,16 +335,14 @@ def extract_table_data_yolo(image: Image.Image, debug_dir_path: str):
             row_text.append(raw_text)
         table_data.append(row_text)
 
-    draw_img.save(os.path.join(debug_dir_path, "2_detected_cells.png"))
+    draw_img.save(os.path.join(debug_dir_path, "3_detected_cells_on_original.png"))
     
-    # 6. Return both the extracted data and the table's bounding box
+    # 7. Return both the extracted data and the table's bounding box
     return {
         "extracted_table": table_data,
-        "table_bbox": table_bbox, # This is now the *padded* box
+        "table_bbox": table_bbox,
         "debug_output_path": debug_dir_path
     }
-
-
 # ------------------------------------------------------------------- #
 # --- MODIFIED CELL SEGMENTATION (FALLBACK/HYBRID LOGIC) ---
 # ------------------------------------------------------------------- #
@@ -301,12 +351,13 @@ def extract_lines_data(image_path: str, unique_filename: str):
     """
     Manages the contour-based process: segments image into cells, recognizes text
     in each, and returns structured data with Y-coordinates.
+    
+    NOTE: This function receives the path to the *fully cleaned* image
+    (table erased AND lines removed).
     """
     scan_temp_dir = os.path.join(TEMP_LINES_DIR, unique_filename)
     os.makedirs(scan_temp_dir, exist_ok=True)
     try:
-        # segment_lines now returns a list of:
-        # [{"paths": [cell_path_1, ...], "y": line_y_coordinate}, ...]
         cell_data_by_row = segment_lines(image_path, scan_temp_dir)
         if not cell_data_by_row: 
             return None
@@ -324,7 +375,6 @@ def extract_lines_data(image_path: str, unique_filename: str):
                     row_text.append(text)
                     pbar.update(1)
                 
-                # Store the text row with its original Y-coordinate
                 all_extracted_lines.append({
                     "row_text": row_text,
                     "y": row_data["y"]
@@ -337,25 +387,24 @@ def extract_lines_data(image_path: str, unique_filename: str):
 
 def segment_lines(image_path, output_dir):
     """
-    Segments an image into lines and then splits those lines into cells based on
-    horizontal spacing.
-    Returns a list of dicts: [{"paths": [cell_paths], "y": line_y}, ...]
+    Segments an image into lines and then splits those lines into cells.
+    Includes the fix to correctly group lines.
     """
     image = cv2.imread(image_path)
     if image is None: 
         return []
     
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    # Image is already binarized from preprocess_image_for_ocr
-    # We threshold to find contours (black text on white bg)
     binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)[1]
     
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours: 
+        print("Segment_lines: No contours found.")
         return []
 
     word_boxes = [cv2.boundingRect(c) for c in contours if cv2.contourArea(c) > 15]
     if not word_boxes: 
+        print("Segment_lines: No word boxes found after filtering contours.")
         return []
             
     word_boxes.sort(key=lambda b: b[1]) # Sort by y-coordinate
@@ -364,32 +413,32 @@ def segment_lines(image_path, output_dir):
     current_line = []
     if word_boxes:
         current_line.append(word_boxes[0])
-        # Calculate avg_height from a sample for robustness
         sample_heights = [h for _, _, _, h in word_boxes[:50]]
-        avg_height = np.mean(sample_heights) if sample_heights else 20 # Default
+        avg_height = np.mean(sample_heights) if sample_heights else 20
 
         for box in word_boxes[1:]:
             last_box_y_center = current_line[-1][1] + current_line[-1][3] / 2
             current_box_y_center = box[1] + box[3] / 2
             
-            if abs(current_box_y_center - last_box_y_center) < avg_height * 0.7:
+            # --- THIS IS THE FIX from the previous step ---
+            # Increased the tolerance from 0.7 to 1.0 to better group
+            # contours (like letters and 'i' dots) on the same line.
+            if abs(current_box_y_center - last_box_y_center) < avg_height * 1.0:
+            # --- END OF FIX ---
                 current_line.append(box)
             else:
                 sorted_line_boxes = sorted(current_line, key=lambda b: b[0])
                 lines_data.append({"boxes": sorted_line_boxes, "y": sorted_line_boxes[0][1]})
                 current_line = [box]
         
-        # Add the last line
         if current_line:
             sorted_line_boxes = sorted(current_line, key=lambda b: b[0])
             lines_data.append({"boxes": sorted_line_boxes, "y": sorted_line_boxes[0][1]})
             
-    # Split each line into cells based on horizontal gaps
-    all_lines_data = [] # Will store {"line_cell_boxes": [...], "y": ...}
+    all_lines_data = [] 
     
-    # Calculate gap threshold based on average character width
     all_widths = [w for _, _, w, h in word_boxes if h > avg_height * 0.5]
-    avg_char_width = np.mean(all_widths) if all_widths else 10 # Default
+    avg_char_width = np.mean(all_widths) if all_widths else 10
     gap_threshold = avg_char_width * 2.0 
 
     for line_data in lines_data:
@@ -397,21 +446,18 @@ def segment_lines(image_path, output_dir):
         line_y = line_data["y"]
         if not line: continue
         
-        cells_in_line = [] # This will be a list of [cell[word_box]]
-        current_cell_boxes = [line[0]] # A cell is a list of word boxes
+        cells_in_line = [] 
+        current_cell_boxes = [line[0]] 
         
         for i in range(len(line) - 1):
             current_word_box = line[i]
             next_word_box = line[i+1]
-            # Gap is from end of current word to start of next word
             gap = next_word_box[0] - (current_word_box[0] + current_word_box[2])
             
             if gap > gap_threshold:
-                # End of a cell
                 cells_in_line.append(current_cell_boxes)
-                current_cell_boxes = [next_word_box] # Start new cell
+                current_cell_boxes = [next_word_box]
             else:
-                # Word is part of the same cell
                 current_cell_boxes.append(next_word_box)
         
         cells_in_line.append(current_cell_boxes) # Add the last cell
@@ -422,8 +468,6 @@ def segment_lines(image_path, output_dir):
 def crop_and_save_cells(image, all_lines_data, output_dir):
     """
     Crops and saves each detected cell.
-    'all_lines_data' is a list of: [{"line_cell_boxes": [cell[word_box]], "y": line_y}]
-    Returns a list of: [{"paths": [cell_path], "y": line_y}]
     """
     final_lines = []
     padding = 10
@@ -435,13 +479,11 @@ def crop_and_save_cells(image, all_lines_data, output_dir):
         for j, cell_boxes in enumerate(line_data["line_cell_boxes"]):
             if not cell_boxes: continue
             
-            # Combine all word boxes in this cell to get one bounding box
             x_min = min(b[0] for b in cell_boxes)
             y_min = min(b[1] for b in cell_boxes)
             x_max = max(b[0] + b[2] for b in cell_boxes)
             y_max = max(b[1] + b[3] for b in cell_boxes)
             
-            # Apply padding
             y1, y2 = max(0, y_min - padding), min(image.shape[0], y_max + padding)
             x1, x2 = max(0, x_min - padding), min(image.shape[1], x_max + padding)
             
@@ -460,7 +502,6 @@ def recognize_line(image_path):
     """Recognizes text from a single cropped image path."""
     try:
         image = Image.open(image_path).convert("RGB")
-        # Reuse the main model processor and model
         pixel_values = processor(images=image, return_tensors="pt").pixel_values.to(device)
         generated_ids = model.generate(pixel_values, max_length=100)
         return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
@@ -487,7 +528,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     return user
 
 # ------------------------------------------------------------------- #
-# --- API ENDPOINTS ---
+# --- API ENDPOINTS (MODIFIED) ---
 # ------------------------------------------------------------------- #
 @app.post("/register", status_code=status.HTTP_201_CREATED)
 def register_user(form: OAuth2PasswordRequestForm=Depends(), db: Session=Depends(database.get_db)):
@@ -521,38 +562,44 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
     try:
         file_content = await file.read()
         
-        # 1. Load and preprocess the original image
+        # 1. Load and perform BASIC preprocessing (binarize, standardize bg)
         original_image_pil = Image.open(io.BytesIO(file_content)).convert("RGB")
-        print("Preprocessing image to standardize background and text color...")
-        processed_image_pil = preprocess_image_for_ocr(original_image_pil)
-        print("✅ Image preprocessing complete.")
+        print("Preprocessing image (basic)...")
+        basic_processed_pil = basic_preprocess(original_image_pil)
+        print("✅ Basic preprocessing complete.")
         
-        # 2. Save the fully preprocessed image (this is what the contour model will use)
-        processed_image_pil.save(saved_image_path, format='PNG')
+        # 2. Save the basic preprocessed image (this is the one we save to db path)
+        basic_processed_pil.save(saved_image_path, format='PNG')
             
         # 3. --- HYBRID LOGIC ---
-        # Try to find a bordered table first using YOLO
-        table_result = extract_table_data_yolo(processed_image_pil, debug_scan_dir)
+        # Run YOLO on the basic image (lines INCLUDED)
+        table_result = extract_table_data_yolo(basic_processed_pil, debug_scan_dir)
         
-        image_for_contours = processed_image_pil.copy()
+        image_for_contours = basic_processed_pil.copy()
         table_data = None
-        table_y_start = float('inf') # Position where the table begins
+        table_y_start = float('inf')
 
         if table_result:
             print("✅ Table found via YOLO! Will combine with other text.")
             table_data = table_result["extracted_table"]
-            table_bbox = table_result["table_bbox"] # This is the padded box
+            table_bbox = table_result["table_bbox"]
             table_y_start = table_bbox[1]
             
+            # Erase table from the "basic" (lines-included) image
             draw = ImageDraw.Draw(image_for_contours)
             draw.rectangle(table_bbox, fill="white")
-            image_for_contours.save(os.path.join(debug_scan_dir, "3_erased_table.png"))
+            image_for_contours.save(os.path.join(debug_scan_dir, "4_erased_table_from_basic.png"))
         else:
             print("⚠️ No table found via YOLO. Processing full page with contour-based segmentation.")
 
-        # 4. Always run contour-based extraction on the (potentially modified) image
-        temp_contour_path = os.path.join(debug_scan_dir, "temp_for_contours.png")
-        image_for_contours.save(temp_contour_path, format='PNG')
+        # 4. NOW, remove lines from the non-table-area image
+        print("Applying line removal to non-table areas...")
+        image_for_contours_cleaned = remove_lines(image_for_contours)
+        print("✅ Line removal complete for non-table areas.")
+        
+        # 5. Run contour-based extraction on the *fully cleaned* image
+        temp_contour_path = os.path.join(debug_scan_dir, "temp_for_contours_CLEANED.png")
+        image_for_contours_cleaned.save(temp_contour_path, format='PNG')
         
         line_result = extract_lines_data(temp_contour_path, unique_filename)
         
@@ -564,9 +611,9 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
                 raise HTTPException(status_code=400, detail="Could not detect any text in the image.")
         else:
             print(f"✅ Contour extraction found {len(line_result['all_lines'])} lines of text.")
-            contour_lines = line_result["all_lines"] # List of {"row_text": [...], "y": ...}
+            contour_lines = line_result["all_lines"]
 
-        # 5. Combine the results in the correct order
+        # 6. Combine the results in the correct order
         final_data_rows = []
         table_inserted = False
 
@@ -583,24 +630,15 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
         if not final_data_rows:
             raise HTTPException(status_code=400, detail="Text extraction resulted in empty content.")
 
-        # ------------------- START: MODIFIED STEP 6 ------------------- #
-        
-        # 6. Format for JSON response AND database
-        
-        # Create a JSON-friendly list and apply corrections cell by cell
+        # 7. Format for JSON response AND database
         json_output_rows = []
         for row in final_data_rows:
-            # Apply correction to each cell in the row
             corrected_row = [correct_currency_symbols(str(cell)) for cell in row]
             json_output_rows.append(corrected_row)
 
-        # Create the flat string *for the database* (using the corrected rows)
         db_text = "\n".join([" | ".join(row) for row in json_output_rows])
-        
-        # The final response data now contains the JSON list
         response_data = {"extracted_text": json_output_rows}
         
-        # Save the *flat string* to the DB
         image_url_path = f"/{TICKETS_DIR}/{unique_filename}"
         new_ticket = models.Ticket(extracted_text=db_text, owner_id=current_user.id, image_path=image_url_path)
         db.add(new_ticket); db.commit(); db.refresh(new_ticket)
@@ -608,8 +646,6 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
         response_data["image_url"] = image_url_path
         response_data["ticket_id"] = new_ticket.id
         
-        # -------------------- END: MODIFIED STEP 6 -------------------- #
-
         return {"filename": file.filename, **response_data}
 
     except Exception as e:
@@ -617,8 +653,10 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
         print(f"An unexpected error occurred: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
     finally:
+        # Clean up debug directory
         if os.path.exists(debug_scan_dir):
             try:
+                pass # Keep debug dir for inspection
                 shutil.rmtree(debug_scan_dir)
             except OSError as e:
                 print(f"Error removing debug directory {debug_scan_dir}: {e.strerror}")
@@ -682,5 +720,4 @@ if __name__ == "__main__":
     print("---------------------------------")
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
-
-# JSON format
+    # line detection done
