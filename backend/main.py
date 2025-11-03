@@ -65,8 +65,8 @@ print(f"Using device: {device}")
 
 print("Loading Hugging Face TrOCR model...")
 # NOTE: Ensure 'ocr_model' is a valid path/name for your TrOCR model
-processor = TrOCRProcessor.from_pretrained('ocr_model') 
-model = VisionEncoderDecoderModel.from_pretrained('ocr_model').to(device)
+processor = TrOCRProcessor.from_pretrained('microsoft/trocr-large-handwritten') 
+model = VisionEncoderDecoderModel.from_pretrained('microsoft/trocr-large-handwritten').to(device)
 print("✅ TrOCR model loaded successfully.")
 
 print("Loading custom YOLOv8 model for table cell detection...")
