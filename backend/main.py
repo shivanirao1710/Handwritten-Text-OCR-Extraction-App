@@ -24,8 +24,9 @@ from database import engine
 from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 from ultralytics import YOLO
 
-# Path to your custom YOLOv8 model
-YOLO_MODEL_PATH = 'bordered.pt'  # Custom YOLO model path
+# --- UPDATED ---
+# Path to your new, smarter YOLOv8 model
+YOLO_MODEL_PATH = 'best.pt' 
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -63,8 +64,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 print("Loading Hugging Face TrOCR model...")
-processor = TrOCRProcessor.from_pretrained('microsoft/trocr-large-handwritten')   # or use microsoft/trocr-large-handwritten 
-model = VisionEncoderDecoderModel.from_pretrained('microsoft/trocr-large-handwritten').to(device)
+# NOTE: Ensure 'ocr_model' is a valid path/name for your TrOCR model
+processor = TrOCRProcessor.from_pretrained('ocr_model') 
+model = VisionEncoderDecoderModel.from_pretrained('ocr_model').to(device)
 print("✅ TrOCR model loaded successfully.")
 
 print("Loading custom YOLOv8 model for table cell detection...")
@@ -83,23 +85,15 @@ def correct_currency_symbols(text: str) -> str:
     """
     Corrects common OCR misinterpretations of currency symbols like:
     - S10, s.50, s0.00, so.00 → $10, $.50, $0.00, $0.00
-    - 5o.00, 5O.00, 5 10 → $0.00, $10
     """
 
     # 1️⃣ Replace 's' or 'S' (possibly followed by o or 0) before digits or dots with $
     text = re.sub(r'\b[sS][oO0]?(?=\s?[\d.])', '$', text)
 
-    # 2️⃣ Replace '5' at the start of a number block (common $ misread)
-    # Example: '5o.00' or '5 10' → '$0.00' / '$10'
-    text = re.sub(r'\b5\s?([0-9oO.]+)', 
-                  lambda m: '$' + m.group(1).replace('o', '0').replace('O', '0'),
-                  text)
-
-    # 3️⃣ Replace 'o' or 'O' inside numbers with '0'
+    # 2️⃣ Replace 'o' or 'O' inside numbers with '0'
     text = re.sub(r'(?<=\d)[oO](?=\d)', '0', text)
 
     return text
-
 
 
 # ------------------------------------------------------------------- #
@@ -131,10 +125,14 @@ def basic_preprocess(image: Image.Image) -> Image.Image:
     final_image_rgb = cv2.cvtColor(binarized, cv2.COLOR_GRAY2RGB)
     return Image.fromarray(final_image_rgb)
 
+# ------------------------------------------------------------------- #
+# --- HORIZONTAL & VERTICAL LINE REMOVAL FUNCTION (UPDATED) ---
+# ------------------------------------------------------------------- #
+
 def remove_lines(image: Image.Image) -> Image.Image:
     """
     Takes a pre-processed (black text on white bg) PIL image
-    and removes horizontal and vertical lines.
+    and removes BOTH horizontal and vertical lines.
     Returns a new line-removed PIL image.
     """
     # Convert PIL Image to OpenCV format (BGR)
@@ -168,6 +166,7 @@ def remove_lines(image: Image.Image) -> Image.Image:
     )
 
     # --- Combine and remove lines ---
+    # We now combine BOTH horizontal and vertical line masks
     all_lines_mask = cv2.add(dilated_horizontal_lines, dilated_vertical_lines)
     
     cleaned_inverted = cv2.subtract(inverted_binarized, all_lines_mask)
@@ -178,9 +177,8 @@ def remove_lines(image: Image.Image) -> Image.Image:
     final_image_rgb = cv2.cvtColor(final_binarized, cv2.COLOR_GRAY2RGB)
     return Image.fromarray(final_image_rgb)
 
-
 # ------------------------------------------------------------------- #
-# --- TABLE DETECTION & OCR (MODIFIED) ---
+# --- TABLE DETECTION & OCR (UNCHANGED FROM LAST TIME) ---
 # ------------------------------------------------------------------- #
 
 def enhance_cell_image(cell_cv_image):
@@ -215,9 +213,23 @@ def enhance_cell_image(cell_cv_image):
     if np.mean(binarized_image) < 128:
         binarized_image = cv2.bitwise_not(binarized_image)
 
+    # --- 💡 MODIFIED BLANK CHECK ---
+    # Count the number of black pixels (text).
+    num_black_pixels = np.sum(binarized_image == 0)
+    
+    total_pixels = binarized_image.shape[0] * binarized_image.shape[1]
+    if total_pixels == 0:
+        return None
+
+    text_percentage = num_black_pixels / total_pixels
+    
+    # If less than 1.5% of the cell is black pixels, consider it blank/noise.
+    if text_percentage < 0.015: 
+        return None # This will be caught by recognize_cell_text
+    # --- END OF MODIFIED BLANK CHECK ---
+
     final_image_rgb = cv2.cvtColor(binarized_image, cv2.COLOR_GRAY2RGB)
     return Image.fromarray(final_image_rgb)
-
 
 def recognize_cell_text(cell_image: Image.Image):
     """Runs TrOCR on a single enhanced cell PIL image."""
@@ -229,6 +241,29 @@ def recognize_cell_text(cell_image: Image.Image):
         return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
     except Exception:
         return ""
+
+
+### --- NEW HELPER FUNCTION --- ###
+def get_y_overlap(box1, box2):
+    """Calculates the percentage of vertical overlap between two boxes."""
+    b1_top, b1_bottom = box1[1], box1[3]
+    b2_top, b2_bottom = box2[1], box2[3]
+    
+    overlap_top = max(b1_top, b2_top)
+    overlap_bottom = min(b1_bottom, b2_bottom)
+    
+    overlap_height = max(0, overlap_bottom - overlap_top)
+    
+    if overlap_height == 0:
+        return 0
+    
+    # Check overlap relative to the *smaller* box's height
+    min_height = min(b1_bottom - b1_top, b2_bottom - b2_top)
+    if min_height == 0:
+        return 0
+        
+    return overlap_height / min_height
+### --- END OF NEW HELPER FUNCTION --- ###
 
 
 def extract_table_data_yolo(image: Image.Image, debug_dir_path: str):
@@ -251,7 +286,7 @@ def extract_table_data_yolo(image: Image.Image, debug_dir_path: str):
 
     # 2. Run YOLO detection
     print("Detecting table cells...")
-    results = yolo_model.predict(original_image_cv, conf=0.2, verbose=False)
+    results = yolo_model.predict(original_image_cv, conf=0.9, verbose=False)
     if not results or results[0].boxes is None or not results[0].boxes.xyxy.nelement():
         print("No cells detected by YOLO.")
         return None
@@ -275,37 +310,45 @@ def extract_table_data_yolo(image: Image.Image, debug_dir_path: str):
     
     table_bbox = [min_x, min_y, max_x, max_y]
     
-    # 4. Sort cells into rows for extraction
-    sorted_cell_boxes = sorted(cell_boxes, key=lambda b: (b[1], b[0]))
-    print(f"Detected {len(sorted_cell_boxes)} cells. Reconstructing table structure...")
+    
+    ### --- START OF REPLACED SORTING LOGIC --- ###
+    # 4. Sort cells into rows using Y-OVERLAP (NEW LOGIC)
+    print(f"Detected {len(cell_boxes)} cells. Reconstructing table structure...")
     
     rows = []
-    current_row = []
-    if sorted_cell_boxes:
-        ref_y = sorted_cell_boxes[0][1]
-        avg_cell_height = np.mean([b[3] - b[1] for b in sorted_cell_boxes])
-        
-        for box in sorted_cell_boxes:
-            if box[1] > ref_y + avg_cell_height * 0.8:
-                rows.append(sorted(current_row, key=lambda b: b[0]))
-                current_row = [box]
-                ref_y = box[1]
-            else:
-                current_row.append(box)
-        rows.append(sorted(current_row, key=lambda b: b[0]))
+    processed_indices = set()
+    # Sort boxes by their top y-coordinate to process them in order
+    box_list_with_indices = sorted(enumerate(cell_boxes), key=lambda item: item[1][1])
 
-    # --- START: NEW LOGIC ---
-    # 5. Create a line-removed version of the image *for cell extraction*
-    print("Removing lines from table area for accurate cell OCR...")
-    cleaned_pil_image = remove_lines(image) # 'image' is the input PIL
+    for i, box in box_list_with_indices:
+        if i in processed_indices:
+            continue
+
+        current_row = [box]
+        processed_indices.add(i)
+        
+        # Find all other boxes that overlap significantly with this one
+        for j, other_box in box_list_with_indices:
+            if j in processed_indices:
+                continue
+            
+            # If it has > 50% vertical overlap, consider it part of the same row
+            if get_y_overlap(box, other_box) > 0.5:
+                current_row.append(other_box)
+                processed_indices.add(j)
+                
+        # Sort the final row by X-coordinate
+        current_row.sort(key=lambda b: b[0])
+        rows.append(current_row)
+    ### --- END OF REPLACED SORTING LOGIC --- ###
+
+
+    # 5. NOW, create a line-removed version of the image for *cropping*.
+    print("Removing ALL lines from table area for clean OCR...")
+    cleaned_image_pil = remove_lines(image) # This now removes H and V lines
+    cleaned_image_cv = cv2.cvtColor(np.array(cleaned_image_pil), cv2.COLOR_RGB2BGR)
     
-    # --- THIS IS THE FIX ---
-    # Convert the 3-channel RGB PIL image to a 3-channel BGR OpenCV image
-    cleaned_image_cv = cv2.cvtColor(np.array(cleaned_pil_image), cv2.COLOR_RGB2BGR)
-    # --- END OF FIX ---
-    
-    cv2.imwrite(os.path.join(debug_dir_path, "2_image_for_cell_extraction.png"), cleaned_image_cv)
-    # --- END: NEW LOGIC ---
+    cv2.imwrite(os.path.join(debug_dir_path, "2_image_for_cell_extraction_CLEANED.png"), cleaned_image_cv)
 
     # 6. Perform OCR on each cell, cropping from the CLEANED image
     table_data = []
@@ -358,8 +401,10 @@ def extract_lines_data(image_path: str, unique_filename: str):
     scan_temp_dir = os.path.join(TEMP_LINES_DIR, unique_filename)
     os.makedirs(scan_temp_dir, exist_ok=True)
     try:
+        print("Segmenting non-table text...")
         cell_data_by_row = segment_lines(image_path, scan_temp_dir)
         if not cell_data_by_row: 
+            print("No non-table text found after segmentation.")
             return None
         
         total_cells = sum(len(row["paths"]) for row in cell_data_by_row)
@@ -385,26 +430,43 @@ def extract_lines_data(image_path: str, unique_filename: str):
         if os.path.exists(scan_temp_dir): 
             shutil.rmtree(scan_temp_dir)
 
+# --- *** NEW ROBUST segment_lines FUNCTION *** ---
 def segment_lines(image_path, output_dir):
     """
     Segments an image into lines and then splits those lines into cells.
     Includes the fix to correctly group lines.
+    Uses robust Otsu thresholding.
     """
     image = cv2.imread(image_path)
     if image is None: 
+        print("Segment_lines: Could not read image.")
         return []
     
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)[1]
+    
+    # --- MODIFICATION: Use Otsu's thresholding just like in basic_preprocess ---
+    # This is more robust for varying text faintness than a hardcoded 200.
+    # We are processing a "clean" image (black text, white bg),
+    # so we threshold and then invert to get white text on black bg for findContours.
+    _, binary_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Ensure it's black text on white bg first (it should be, but let's check)
+    if np.mean(binary_otsu) < 128:
+        # This means it's white text on black, which is wrong for this stage
+        binary_otsu = cv2.bitwise_not(binary_otsu) # Invert to black text on white bg
+
+    # Now, invert for findContours (white text on black bg)
+    binary = cv2.bitwise_not(binary_otsu)
+    # --- END OF MODIFICATION ---
     
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours: 
         print("Segment_lines: No contours found.")
         return []
-
+        
     word_boxes = [cv2.boundingRect(c) for c in contours if cv2.contourArea(c) > 15]
     if not word_boxes: 
-        print("Segment_lines: No word boxes found after filtering contours.")
+        print("Segment_lines: No word boxes found after filtering contours (area < 15).")
         return []
             
     word_boxes.sort(key=lambda b: b[1]) # Sort by y-coordinate
@@ -420,11 +482,7 @@ def segment_lines(image_path, output_dir):
             last_box_y_center = current_line[-1][1] + current_line[-1][3] / 2
             current_box_y_center = box[1] + box[3] / 2
             
-            # --- THIS IS THE FIX from the previous step ---
-            # Increased the tolerance from 0.7 to 1.0 to better group
-            # contours (like letters and 'i' dots) on the same line.
             if abs(current_box_y_center - last_box_y_center) < avg_height * 1.0:
-            # --- END OF FIX ---
                 current_line.append(box)
             else:
                 sorted_line_boxes = sorted(current_line, key=lambda b: b[0])
@@ -437,9 +495,15 @@ def segment_lines(image_path, output_dir):
             
     all_lines_data = [] 
     
-    all_widths = [w for _, _, w, h in word_boxes if h > avg_height * 0.5]
+    # --- PYLANCE ERROR FIX: Replaced list comprehension with a for loop ---
+    all_widths = []
+    for _, _, w, h in word_boxes:
+        if h > avg_height * 0.5:
+            all_widths.append(w)
+            
     avg_char_width = np.mean(all_widths) if all_widths else 10
     gap_threshold = avg_char_width * 2.0 
+    # --- END OF FIX ---
 
     for line_data in lines_data:
         line = line_data["boxes"]
@@ -502,6 +566,23 @@ def recognize_line(image_path):
     """Recognizes text from a single cropped image path."""
     try:
         image = Image.open(image_path).convert("RGB")
+        
+        # --- 💡 MODIFIED BLANK CHECK ---
+        image_cv_gray = np.array(image.convert("L"))
+        _, binarized = cv2.threshold(image_cv_gray, 200, 255, cv2.THRESH_BINARY)
+        
+        num_black_pixels = np.sum(binarized == 0)
+        total_pixels = binarized.shape[0] * binarized.shape[1]
+
+        if total_pixels == 0:
+            return "" # Empty image
+
+        text_percentage = num_black_pixels / total_pixels
+        
+        if text_percentage < 0.015:
+            return "" # Return empty string directly
+        # --- END OF MODIFIED BLANK CHECK ---
+
         pixel_values = processor(images=image, return_tensors="pt").pixel_values.to(device)
         generated_ids = model.generate(pixel_values, max_length=100)
         return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
@@ -528,7 +609,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     return user
 
 # ------------------------------------------------------------------- #
-# --- API ENDPOINTS (MODIFIED) ---
+# --- API ENDPOINTS (UNCHANGED FROM LAST TIME) ---
 # ------------------------------------------------------------------- #
 @app.post("/register", status_code=status.HTTP_201_CREATED)
 def register_user(form: OAuth2PasswordRequestForm=Depends(), db: Session=Depends(database.get_db)):
@@ -592,16 +673,18 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
         else:
             print("⚠️ No table found via YOLO. Processing full page with contour-based segmentation.")
 
-        # 4. NOW, remove lines from the non-table-area image
-        print("Applying line removal to non-table areas...")
-        image_for_contours_cleaned = remove_lines(image_for_contours)
+        # 4. NOW, remove ALL lines from the non-table-area image
+        print("Applying horizontal & vertical line removal to non-table areas...")
+        image_for_contours_cleaned = remove_lines(image_for_contours) # This now removes H and V lines
         print("✅ Line removal complete for non-table areas.")
         
         # 5. Run contour-based extraction on the *fully cleaned* image
         temp_contour_path = os.path.join(debug_scan_dir, "temp_for_contours_CLEANED.png")
         image_for_contours_cleaned.save(temp_contour_path, format='PNG')
         
+        print("--- Calling extract_lines_data (for non-table text) ---")
         line_result = extract_lines_data(temp_contour_path, unique_filename)
+        print("--- Returned from extract_lines_data ---")
         
         contour_lines = []
         if not line_result or not line_result.get("all_lines"):
@@ -650,16 +733,21 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
 
     except Exception as e:
         if isinstance(e, HTTPException): raise e
+        # Print the full traceback for the unexpected error
+        import traceback
+        print("--- UNEXPECTED ERROR TRACEBACK ---")
+        traceback.print_exc()
+        print("-----------------------------------")
         print(f"An unexpected error occurred: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
     finally:
-        # Clean up debug directory
         if os.path.exists(debug_scan_dir):
             try:
                 pass # Keep debug dir for inspection
                 shutil.rmtree(debug_scan_dir)
             except OSError as e:
                 print(f"Error removing debug directory {debug_scan_dir}: {e.strerror}")
+
 
 @app.post("/update-ticket-text")
 def update_ticket_text(
@@ -715,9 +803,8 @@ if __name__ == "__main__":
     import uvicorn
     print("--- Starting FastAPI Server ---")
     print(f"YOLO Model: {YOLO_MODEL_PATH} ({'LOADED' if yolo_model else 'NOT FOUND'})")
-    print(f"TrOCR Model: microsoft/trocr-large-handwritten (LOADED)")
+    print(f"TrOCR Model: ocr_model (LOADED)")
     print(f"Using Device: {device}")
     print("---------------------------------")
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
-    # line detection done

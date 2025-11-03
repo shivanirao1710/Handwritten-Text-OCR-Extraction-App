@@ -24,7 +24,9 @@ export default function App() {
   const [userId, setUserId] = useState<number | null>(null);
   const [tickets, setTickets] = useState<{ id: number, extracted_text: string, image_url: string }[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [processingImageUri, setProcessingImageUri] = useState<string | null>(null);
+  
+  // *** MODIFIED ***: Removed processingImageUri, it's no longer needed
+  // const [processingImageUri, setProcessingImageUri] = useState<string | null>(null);
   
   // States for edit functionality
   const [editModalVisible, setEditModalVisible] = useState(false);
@@ -32,7 +34,7 @@ export default function App() {
   const [editedText, setEditedText] = useState('');
   const [isUpdating, setIsUpdating] = useState(false);
 
-  const API_BASE_URL = 'https://774d55eedc66.ngrok-free.app';
+  const API_BASE_URL = 'https://8650d9d92dbe.ngrok-free.app';
 
   // --- API & Event Handlers ---
 
@@ -112,8 +114,11 @@ export default function App() {
     setScreen('login');
   };
 
+  // -----------------------------------------------------------------
+  // --- *** UPDATED FUNCTION TO HANDLE MULTIPLE IMAGES *** ---
+  // -----------------------------------------------------------------
   const handleScanAndUpload = async () => {
-    setIsLoading(true);
+    setIsLoading(true); // Show spinner on dashboard
     try {
       // Open the document scanner
       const { scannedImages, status } = await DocumentScanner.scanDocument();
@@ -125,42 +130,62 @@ export default function App() {
         return;
       }
 
-      // If images are scanned, process the first one
+      // If images are scanned, process ALL of them
       if (scannedImages && scannedImages.length > 0) {
-        const imageUri = scannedImages[0];
-        setProcessingImageUri(imageUri); // Set for display on processing screen
-        setScreen('processing');
+        // Set generic processing screen
+        setScreen('processing'); 
+        
+        let successCount = 0;
+        let failedCount = 0;
+        
+        // Loop through each scanned image URI
+        for (const [index, imageUri] of scannedImages.entries()) {
+          console.log(`Processing image ${index + 1} of ${scannedImages.length}...`);
+          try {
+            // Prepare NEW form data for EACH image
+            const formData = new FormData();
+            formData.append('file', {
+              uri: imageUri,
+              type: 'image/jpeg',
+              name: `ticket_page_${index + 1}.jpg`, // Give each file a unique name
+            });
 
-        // Prepare form data for upload
-        const formData = new FormData();
-        formData.append('file', {
-          uri: imageUri,
-          type: 'image/jpeg',
-          name: 'ticket.jpg',
-        });
+            // Upload the image to the backend
+            const response = await fetch(`${API_BASE_URL}/scan`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${authToken}` },
+              body: formData,
+            });
 
-        // Upload the image to the backend
-        const response = await fetch(`${API_BASE_URL}/scan`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${authToken}` },
-          body: formData,
-        });
-
-        if (response.ok) {
-          const result = await response.json();
-          Alert.alert('Scan Successful', `Extracted Text: ${result.extracted_text}`);
-        } else {
-          const errorData = await response.json();
-          Alert.alert('Scan Failed', errorData.detail || 'Could not process the image.');
+            if (response.ok) {
+              const result = await response.json();
+              console.log(`Successfully processed image ${index + 1}`);
+              successCount++;
+            } else {
+              const errorData = await response.json();
+              console.error(`Failed to process image ${index + 1}:`, errorData.detail);
+              failedCount++;
+            }
+          } catch (uploadError) {
+            console.error(`Error uploading image ${index + 1}:`, uploadError);
+            failedCount++;
+          }
         }
+        
+        // Give a summary alert
+        Alert.alert(
+          'Processing Complete',
+          `Successfully processed ${successCount} image(s).\nFailed to process ${failedCount} image(s).`
+        );
+
       }
     } catch (error) {
       console.error('Scan or Upload Error:', error);
-      Alert.alert('Please wait', 'The image is still being processed. This may take a moment.');
+      Alert.alert('Error', 'An error occurred during the scan. Please try again.');
     } finally {
       setIsLoading(false);
       setScreen('dashboard'); // Always return to dashboard after processing
-      setProcessingImageUri(null); // Clear the processing image
+      // setProcessingImageUri(null); // No longer needed
     }
   };
 
@@ -195,51 +220,52 @@ export default function App() {
 
   // Function to save edited text
   const handleSaveEditedText = async () => {
-  if (!editingTicket || !editedText.trim()) {
-    Alert.alert('Error', 'Please enter some text');
-    return;
-  }
-
-  setIsUpdating(true);
-  try {
-    const response = await fetch(`${API_BASE_URL}/update-ticket-text`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${authToken}`
-      },
-      body: JSON.stringify({
-        ticket_id: editingTicket.id,
-        extracted_text: editedText
-      }),
-    });
-
-    if (response.ok) {
-      const result = await response.json();
-      
-      // Update the local state
-      const updatedTickets = tickets.map(ticket =>
-        ticket.id === editingTicket.id 
-          ? { ...ticket, extracted_text: result.ticket.extracted_text }
-          : ticket
-      );
-      setTickets(updatedTickets);
-      
-      Alert.alert('Success', 'Text updated successfully!');
-      setEditModalVisible(false);
-      setEditingTicket(null);
-      setEditedText('');
-    } else {
-      const errorData = await response.json();
-      Alert.alert('Update Failed', errorData.detail || 'Failed to update text');
+    if (!editingTicket || !editedText.trim()) {
+      Alert.alert('Error', 'Please enter some text');
+      return;
     }
-  } catch (error) {
-    console.error('Update Error:', error);
-    Alert.alert('Error', 'An error occurred while updating the text');
-  } finally {
-    setIsUpdating(false);
-  }
-};
+
+    setIsUpdating(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/update-ticket-text`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: JSON.stringify({
+          ticket_id: editingTicket.id,
+          extracted_text: editedText
+        }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        
+        // Update the local state
+        const updatedTickets = tickets.map(ticket =>
+          ticket.id === editingTicket.id 
+            ? { ...ticket, extracted_text: result.ticket.extracted_text }
+            : ticket
+        );
+        setTickets(updatedTickets);
+        
+        Alert.alert('Success', 'Text updated successfully!');
+        setEditModalVisible(false);
+        setEditingTicket(null);
+        setEditedText('');
+      } else {
+        const errorData = await response.json();
+        Alert.alert('Update Failed', errorData.detail || 'Failed to update text');
+      }
+    } catch (error) {
+      console.error('Update Error:', error);
+      Alert.alert('Error', 'An error occurred while updating the text');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
   // Function to cancel editing
   const handleCancelEdit = () => {
     setEditModalVisible(false);
@@ -322,19 +348,17 @@ export default function App() {
     );
   }
 
-  if (screen === 'processing' && processingImageUri) {
+  // -----------------------------------------------------------------
+  // --- *** UPDATED PROCESSING SCREEN *** ---
+  // -----------------------------------------------------------------
+  if (screen === 'processing') {
     return (
         <SafeAreaView style={styles.container}>
             <Text style={styles.title}>Processing...</Text>
             <View style={styles.processingContainer}>
-                <Image
-                    style={[styles.previewImage, styles.processingImage]}
-                    source={{ uri: processingImageUri }}
-                />
-                <View style={styles.overlay}>
-                    <ActivityIndicator size="large" color="#fff" />
-                    <Text style={styles.processingText}>Uploading and scanning your ticket</Text>
-                </View>
+                {/* Removed the specific image preview */}
+                <ActivityIndicator size="large" color="#007bff" />
+                <Text style={styles.processingText}>Uploading and scanning your ticket(s)</Text>
             </View>
         </SafeAreaView>
     );
@@ -601,32 +625,36 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
   },
-  previewImage: { 
+  previewImage: { // Kept for other potential uses, but not in processing
     width: '100%', 
     height: 300, 
     resizeMode: 'contain', 
     borderRadius: 10, 
     marginBottom: 20 
   },
+  // Updated processing styles
   processingContainer: {
+    flex: 1, // Make it fill the 'content' area
     alignItems: 'center',
     justifyContent: 'center',
     width: '100%',
   },
-  processingImage: {
-    opacity: 0.6,
-  },
-  overlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
-    borderRadius: 10,
-  },
   processingText: {
-    color: '#fff',
-    marginTop: 10,
-    fontSize: 16,
+    color: '#333',
+    marginTop: 20,
+    fontSize: 18,
     fontWeight: 'bold',
+    textAlign: 'center',
   },
+  // Old styles that are no longer used by processing screen
+  // processingImage: {
+  //   opacity: 0.6,
+  // },
+  // overlay: {
+  //   ...StyleSheet.absoluteFillObject,
+  //   justifyContent: 'center',
+  //   alignItems: 'center',
+  //   backgroundColor: 'rgba(0, 0, 0, 0.4)',
+  //   borderRadius: 10,
+  // },
 });
