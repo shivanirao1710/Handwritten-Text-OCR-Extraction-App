@@ -646,15 +646,4 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     textAlign: 'center',
   },
-  // Old styles that are no longer used by processing screen
-  // processingImage: {
-  //   opacity: 0.6,
-  // },
-  // overlay: {
-  //   ...StyleSheet.absoluteFillObject,
-  //   justifyContent: 'center',
-  //   alignItems: 'center',
-  //   backgroundColor: 'rgba(0, 0, 0, 0.4)',
-  //   borderRadius: 10,
-  // },
 });
