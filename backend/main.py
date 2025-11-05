@@ -720,7 +720,7 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
         if os.path.exists(debug_scan_dir):
             try:
                 pass # Keep debug dir for inspection
-                # shutil.rmtree(debug_scan_dir) # Uncomment to clean up
+                shutil.rmtree(debug_scan_dir) # Uncomment to clean up
             except OSError as e:
                 print(f"Error removing debug directory {debug_scan_dir}: {e.strerror}")
 
