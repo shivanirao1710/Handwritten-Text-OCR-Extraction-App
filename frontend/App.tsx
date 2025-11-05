@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
@@ -15,6 +15,26 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DocumentScanner from 'react-native-document-scanner-plugin';
 
+// --- *** NEW *** ---
+// Define a type that matches your new backend API response
+interface Ticket {
+  id: number;
+  image_url: string;
+  created_at: string;
+  raw_text_content: string; // Renamed from extracted_text
+  // All the new structured fields
+  ticket_number: string | null;
+  ticket_date: string | null;
+  haul_vendor: string | null;
+  truck_number: string | null;
+  material: string | null;
+  job_number: string | null;
+  phase_code: string | null;
+  zone: string | null;
+  hours: number | null;
+}
+// --- *** END NEW *** ---
+
 export default function App() {
   // State Management
   const [screen, setScreen] = useState('register');
@@ -22,19 +42,21 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [userId, setUserId] = useState<number | null>(null);
-  const [tickets, setTickets] = useState<{ id: number, extracted_text: string, image_url: string }[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
   
-  // *** MODIFIED ***: Removed processingImageUri, it's no longer needed
-  // const [processingImageUri, setProcessingImageUri] = useState<string | null>(null);
+  // --- *** UPDATED State Type *** ---
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
   
   // States for edit functionality
   const [editModalVisible, setEditModalVisible] = useState(false);
-  const [editingTicket, setEditingTicket] = useState<{ id: number, extracted_text: string, image_url: string } | null>(null);
+  
+  // --- *** UPDATED State Type *** ---
+  const [editingTicket, setEditingTicket] = useState<Ticket | null>(null);
   const [editedText, setEditedText] = useState('');
   const [isUpdating, setIsUpdating] = useState(false);
 
-  const API_BASE_URL = 'https://8650d9d92dbe.ngrok-free.app';
+  // ⛔️ UPDATE THIS NGROK URL
+  const API_BASE_URL = 'https://b38a7ebc874b.ngrok-free.app';
 
   // --- API & Event Handlers ---
 
@@ -114,43 +136,33 @@ export default function App() {
     setScreen('login');
   };
 
-  // -----------------------------------------------------------------
-  // --- *** UPDATED FUNCTION TO HANDLE MULTIPLE IMAGES *** ---
-  // -----------------------------------------------------------------
   const handleScanAndUpload = async () => {
-    setIsLoading(true); // Show spinner on dashboard
+    setIsLoading(true);
     try {
-      // Open the document scanner
       const { scannedImages, status } = await DocumentScanner.scanDocument();
 
-      // Check if the user cancelled the scan
       if ((status as string) === "cancelled") {
         console.log("Scan was cancelled by the user.");
         setIsLoading(false);
         return;
       }
 
-      // If images are scanned, process ALL of them
       if (scannedImages && scannedImages.length > 0) {
-        // Set generic processing screen
         setScreen('processing'); 
         
         let successCount = 0;
         let failedCount = 0;
         
-        // Loop through each scanned image URI
         for (const [index, imageUri] of scannedImages.entries()) {
           console.log(`Processing image ${index + 1} of ${scannedImages.length}...`);
           try {
-            // Prepare NEW form data for EACH image
             const formData = new FormData();
             formData.append('file', {
               uri: imageUri,
               type: 'image/jpeg',
-              name: `ticket_page_${index + 1}.jpg`, // Give each file a unique name
+              name: `ticket_page_${index + 1}.jpg`,
             });
 
-            // Upload the image to the backend
             const response = await fetch(`${API_BASE_URL}/scan`, {
               method: 'POST',
               headers: { 'Authorization': `Bearer ${authToken}` },
@@ -158,9 +170,12 @@ export default function App() {
             });
 
             if (response.ok) {
-              const result = await response.json();
-              console.log(`Successfully processed image ${index + 1}`);
+              // const result = await response.json(); // We get the new ticket back
+              // --- *** UPDATED *** ---
+              // We could add the 'result' to the 'tickets' state here,
+              // but it's easier to just re-fetch the list.
               successCount++;
+              
             } else {
               const errorData = await response.json();
               console.error(`Failed to process image ${index + 1}:`, errorData.detail);
@@ -172,21 +187,29 @@ export default function App() {
           }
         }
         
-        // Give a summary alert
         Alert.alert(
           'Processing Complete',
           `Successfully processed ${successCount} image(s).\nFailed to process ${failedCount} image(s).`
         );
+        
+        // --- *** NEW *** ---
+        // After scanning, automatically refresh the ticket list and go to review
+        if (successCount > 0) {
+          handleReviewTickets(); // This will fetch and setScreen('review')
+        } else {
+          setScreen('dashboard'); // Go back to dashboard if all failed
+        }
 
+      } else {
+         setIsLoading(false); // No images scanned
       }
     } catch (error) {
       console.error('Scan or Upload Error:', error);
       Alert.alert('Error', 'An error occurred during the scan. Please try again.');
-    } finally {
       setIsLoading(false);
-      setScreen('dashboard'); // Always return to dashboard after processing
-      // setProcessingImageUri(null); // No longer needed
+      setScreen('dashboard');
     }
+    // 'finally' block removed, as navigation is now handled above
   };
 
   const handleReviewTickets = async () => {
@@ -197,7 +220,7 @@ export default function App() {
         headers: { 'Authorization': `Bearer ${authToken}` },
       });
       if (response.ok) {
-        const data = await response.json();
+        const data: Ticket[] = await response.json(); // Use our new Ticket type
         setTickets(data);
         setScreen('review');
       } else {
@@ -211,13 +234,16 @@ export default function App() {
     }
   };
 
+  // --- *** UPDATED FUNCTION *** ---
   // Function to handle text editing
-  const handleEditText = (ticket: { id: number, extracted_text: string, image_url: string }) => {
+  const handleEditText = (ticket: Ticket) => {
     setEditingTicket(ticket);
-    setEditedText(ticket.extracted_text);
+    // Load the RAW text blob into the editor
+    setEditedText(ticket.raw_text_content); 
     setEditModalVisible(true);
   };
 
+  // --- *** UPDATED FUNCTION *** ---
   // Function to save edited text
   const handleSaveEditedText = async () => {
     if (!editingTicket || !editedText.trim()) {
@@ -233,20 +259,23 @@ export default function App() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${authToken}`
         },
+        // --- *** BODY FIXED *** ---
+        // Send 'raw_text' as expected by the backend
         body: JSON.stringify({
           ticket_id: editingTicket.id,
-          extracted_text: editedText
+          raw_text: editedText 
         }),
       });
 
       if (response.ok) {
         const result = await response.json();
+        const updatedTicket: Ticket = result.ticket;
         
-        // Update the local state
+        // --- *** STATE UPDATE FIXED *** ---
+        // Replace the entire old ticket with the new, re-parsed ticket
+        // from the backend. This updates structured data too.
         const updatedTickets = tickets.map(ticket =>
-          ticket.id === editingTicket.id 
-            ? { ...ticket, extracted_text: result.ticket.extracted_text }
-            : ticket
+          ticket.id === editingTicket.id ? updatedTicket : ticket
         );
         setTickets(updatedTickets);
         
@@ -272,6 +301,38 @@ export default function App() {
     setEditingTicket(null);
     setEditedText('');
   };
+
+  // --- *** NEW HELPER FUNCTION *** ---
+  // Renders a single row for the structured data
+  const renderDataRow = (label: string, value: string | number | null) => {
+    if (!value) return null; // Don't render empty rows
+
+    return (
+      <View style={styles.dataRow}>
+        <Text style={styles.dataLabel}>{label}</Text>
+        <Text style={styles.dataValue}>{value}</Text>
+      </View>
+    );
+  };
+
+  // Renders the structured data view
+  const renderStructuredData = (ticket: Ticket) => {
+    return (
+      <View style={styles.structuredContainer}>
+        {renderDataRow("Ticket #", ticket.ticket_number)}
+        {renderDataRow("Date", ticket.ticket_date)}
+        {renderDataRow("Haul Vendor", ticket.haul_vendor)}
+        {renderDataRow("Truck #", ticket.truck_number)}
+        {renderDataRow("Material", ticket.material)}
+        {renderDataRow("Job #", ticket.job_number)}
+        {renderDataRow("Phase Code", ticket.phase_code)}
+        {renderDataRow("Zone", ticket.zone)}
+        {renderDataRow("Hours", ticket.hours)}
+      </View>
+    );
+  };
+  // --- *** END NEW HELPER FUNCTIONS *** ---
+
 
   // --- UI Screens ---
   const renderAuthScreen = (type: 'login' | 'register') => (
@@ -340,23 +401,24 @@ export default function App() {
             <TouchableOpacity 
               style={styles.buttonWide} 
               onPress={handleReviewTickets}
+              disabled={isLoading} // Disable while scanning
             >
-              <Text style={styles.buttonText}>Review Tickets</Text>
+              {isLoading ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Text style={styles.buttonText}>Review Tickets</Text>
+              )}
             </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
   }
 
-  // -----------------------------------------------------------------
-  // --- *** UPDATED PROCESSING SCREEN *** ---
-  // -----------------------------------------------------------------
   if (screen === 'processing') {
     return (
         <SafeAreaView style={styles.container}>
             <Text style={styles.title}>Processing...</Text>
             <View style={styles.processingContainer}>
-                {/* Removed the specific image preview */}
                 <ActivityIndicator size="large" color="#007bff" />
                 <Text style={styles.processingText}>Uploading and scanning your ticket(s)</Text>
             </View>
@@ -364,6 +426,7 @@ export default function App() {
     );
   }
 
+  // --- *** UPDATED REVIEW SCREEN *** ---
   if (screen === 'review') {
     return (
       <SafeAreaView style={styles.container}>
@@ -379,13 +442,20 @@ export default function App() {
                     resizeMode="contain"
                   />
                 )}
-                <Text style={styles.ticketText}>{ticket.extracted_text}</Text>
-                {/* Edit button */}
+                
+                {/* --- RENDER STRUCTURED DATA --- */}
+                {renderStructuredData(ticket)}
+
+                {/* --- RENDER RAW TEXT --- */}
+                <Text style={styles.rawTextTitle}>Full Extracted Text:</Text>
+                <Text style={styles.ticketText}>{ticket.raw_text_content}</Text>
+                
+                {/* --- Edit button --- */}
                 <TouchableOpacity 
                   style={styles.editButton}
                   onPress={() => handleEditText(ticket)}
                 >
-                  <Text style={styles.editButtonText}>Edit Text</Text>
+                  <Text style={styles.editButtonText}>Edit Raw Text</Text>
                 </TouchableOpacity>
               </View>
             ))
@@ -398,7 +468,7 @@ export default function App() {
           <Text style={styles.buttonText}>Back to Dashboard</Text>
         </TouchableOpacity>
 
-        {/* Edit Modal */}
+        {/* Edit Modal (no changes needed here, it's correct) */}
         <Modal
           animationType="slide"
           transparent={true}
@@ -407,7 +477,7 @@ export default function App() {
         >
           <View style={styles.modalOverlay}>
             <View style={styles.modalContent}>
-              <Text style={styles.modalTitle}>Edit Extracted Text</Text>
+              <Text style={styles.modalTitle}>Edit Raw Text</Text>
               
               <TextInput
                 style={styles.textInput}
@@ -415,7 +485,7 @@ export default function App() {
                 numberOfLines={8}
                 value={editedText}
                 onChangeText={setEditedText}
-                placeholder="Edit the extracted text here..."
+                placeholder="Edit the raw extracted text here..."
                 textAlignVertical="top"
               />
               
@@ -540,11 +610,44 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginBottom: 10,
   },
-  ticketText: {
-    fontSize: 16,
-    color: '#333',
+  // --- *** NEW STYLES *** ---
+  structuredContainer: {
     marginBottom: 10,
-    lineHeight: 20,
+    padding: 10,
+    backgroundColor: '#f9f9f9',
+    borderRadius: 6,
+  },
+  dataRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  dataLabel: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  dataValue: {
+    fontSize: 16,
+    color: '#555',
+  },
+  rawTextTitle: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#666',
+    marginTop: 10,
+    marginBottom: 5,
+    borderTopWidth: 1,
+    borderTopColor: '#eee',
+    paddingTop: 10,
+  },
+  // --- *** END NEW STYLES *** ---
+  ticketText: { // This now styles the RAW text
+    fontSize: 14,
+    color: '#444',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginBottom: 10,
+    lineHeight: 18,
   },
   noTicketsText: {
     textAlign: 'center',
@@ -552,9 +655,8 @@ const styles = StyleSheet.create({
     color: '#666',
     marginTop: 50,
   },
-  // Edit button styles
   editButton: {
-    backgroundColor: '#28a745',
+    backgroundColor: '#17a2b8', // Changed color
     padding: 10,
     borderRadius: 6,
     alignItems: 'center',
@@ -579,10 +681,7 @@ const styles = StyleSheet.create({
     width: '100%',
     maxHeight: '80%',
     shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
+    shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.25,
     shadowRadius: 4,
     elevation: 5,
@@ -625,16 +724,9 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
   },
-  previewImage: { // Kept for other potential uses, but not in processing
-    width: '100%', 
-    height: 300, 
-    resizeMode: 'contain', 
-    borderRadius: 10, 
-    marginBottom: 20 
-  },
   // Updated processing styles
   processingContainer: {
-    flex: 1, // Make it fill the 'content' area
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     width: '100%',

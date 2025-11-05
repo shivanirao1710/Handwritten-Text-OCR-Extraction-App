@@ -1,7 +1,7 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, func
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, func, Float
 from sqlalchemy.orm import relationship
 
-# Changed from relative to absolute import
+# Absolute import from your database.py file
 from database import Base
 
 
@@ -17,14 +17,34 @@ class User(Base):
 
 
 class Ticket(Base):
-    """SQLAlchemy model for the Ticket table."""
+    """
+    SQLAlchemy model for the Ticket table.
+    
+    This model is updated to store both the raw OCR text dump
+    and the new structured (Key-Value) fields.
+    """
     __tablename__ = "tickets"
 
     id = Column(Integer, primary_key=True, index=True)
-    extracted_text = Column(String, index=True, nullable=False)
-    # This line is the crucial addition
-    image_path = Column(String, nullable=True)  # Path to the saved image file
-    owner_id = Column(Integer, ForeignKey("users.id"))
+    image_path = Column(String, nullable=True) # Path to the saved image file
     created_at = Column(DateTime, default=func.now())
+    owner_id = Column(Integer, ForeignKey("users.id"))
 
     owner = relationship("User", back_populates="tickets")
+    
+    # --- Renamed Field ---
+    # We rename 'extracted_text' to be more specific
+    raw_text_content = Column(String, nullable=True)
+
+    # --- NEW Structured Data Fields ---
+    # These fields will be populated by the KVP extraction
+    
+    ticket_number = Column(String, index=True, nullable=True)
+    ticket_date = Column(String, nullable=True) # Storing as string for simplicity
+    haul_vendor = Column(String, nullable=True)
+    truck_number = Column(String, nullable=True)
+    material = Column(String, nullable=True)
+    job_number = Column(String, nullable=True)
+    phase_code = Column(String, nullable=True)
+    zone = Column(String, nullable=True)
+    hours = Column(Float, nullable=True) # Use Float for hours
