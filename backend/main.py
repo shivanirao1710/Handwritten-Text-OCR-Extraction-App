@@ -423,11 +423,11 @@ def extract_structured_data(raw_text: str) -> dict:
     # --- *** STEP 1: (Fast Path) Find values on the SAME LINE *** ---
     # This is where the bug was. The value regex for material/haul_vendor was bad.
     patterns = {
-        "ticket_number": r'(?i)(?:Ticket Number|Ticket#|TICKET NO|Ticket #|Inovice #|Invoice#)\s*[:\-]?\s*([A-Za-z0-9\-\s]+)',
+        "ticket_number": r'(?i)(?:Ticket Number|Ticket#|TICKET NO|Ticket #|Inovice #|Invoice#)\s*[:\-]?\s*([A-Za-z0-9\-]+)',
         "ticket_date":   r'(?i)(?:Date)\s*[:\-]?\s*([\d\/\-]{6,10})', 
         "haul_vendor":   r'(?i)(?:Haul Vendor|Vendor|Broker|Trucker|Customer)\s*[:\-]?\s*([A-Za-z&][A-Za-z\s&]*)', # <-- FIXED
         "truck_number":  r'(?i)(?:Truck Number|Truck No|Truck #)\s*[:\-]?\s*([A-Za-z0-9\-]+)',
-        "material":      r'(?i)(?:Material(?:\s+hauled)?)\s*[:\-]?\s*([A-Za-z\d\-][A-Za-z\s\d\-]*)', # <-- FIXED
+        "material":      r'(?i)(?:Material\s+hauled)\s*[:\-]?\s*([A-Za-z\d\-][A-Za-z\s\d\-]*)',
         "job_number":    r'(?i)(?:Job Number|Job No|Job #)\s*[:\-]?\s*([A-Za-z0-9\-]+)',
         "phase_code":    r'(?i)(?:Phase Code)\s*[:\-]?\s*([A-Za-z0-9\-]+)',
         "zone":          r'(?i)(?:Zone)\s*[:\-]?\s*([A-Za-z0-9\-]+)',
@@ -457,11 +457,11 @@ def extract_structured_data(raw_text: str) -> dict:
     # --- *** STEP 2: (Next-Line/Cell Logic) *** ---
     # This also has the fixes for material/haul_vendor
     multi_find_patterns = {
-        "ticket_number": (r'(?i)(?:Ticket Number|Ticket#|TICKET NO|Ticket #|Inovice #|Invoice#|Ticket # )', r'([A-Za-z0-9\-\s]+)'),
+        "ticket_number": (r'(?i)(?:Ticket Number|Ticket#|TICKET NO|Ticket #|Inovice #|Invoice#|Ticket # )', r'([A-Za-z0-9\-]+)'),
         "ticket_date":   (r'(?i)(?:Date)', r'([\d\/\-]{6,10})'),
         "haul_vendor":   (r'(?i)(?:Haul Vendor|Vendor|Broker|Trucker|Customer)', r'([A-Za-z&][A-Za-z\s&]*)'), # <-- FIXED
         "truck_number":  (r'(?i)(?:Truck Number|Truck No|Truck #)', r'([A-Za-z0-9\-]+)'),
-        "material":      (r'(?i)(?:Material(?:\s+hauled)?)', r'([A-Za-z\d\-][A-Za-z\s\d\-]*)'), # <-- FIXED
+        "material":      (r'(?i)(?:Material\s+hauled)', r'([A-Za-z\d\-][A-Za-z\s\d\-]*)'),
         "job_number":    (r'(?i)(?:Job Number|Job No|Job #)', r'([A-Za-z0-9\-]+)'),
         "phase_code":    (r'(?i)(?:Phase Code)', r'([A-Za-z0-9\-]+)'),
         "zone":          (r'(?i)(?:Zone)', r'([A-Za-z0-9\-]+)'),
@@ -720,7 +720,7 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
         if os.path.exists(debug_scan_dir):
             try:
                 pass # Keep debug dir for inspection
-                shutil.rmtree(debug_scan_dir) # Uncomment to clean up
+                # shutil.rmtree(debug_scan_dir) # Uncomment to clean up
             except OSError as e:
                 print(f"Error removing debug directory {debug_scan_dir}: {e.strerror}")
 
