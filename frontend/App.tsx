@@ -56,7 +56,7 @@ export default function App() {
   const [isUpdating, setIsUpdating] = useState(false);
 
   // ⛔️ UPDATE THIS NGROK URL
-  const API_BASE_URL = 'https://b38a7ebc874b.ngrok-free.app';
+  const API_BASE_URL = 'https://670ec85efedc.ngrok-free.app';
 
   // --- API & Event Handlers ---
 
