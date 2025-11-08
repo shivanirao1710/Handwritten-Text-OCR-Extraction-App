@@ -26,19 +26,20 @@ class Ticket(Base):
     __tablename__ = "tickets"
 
     id = Column(Integer, primary_key=True, index=True)
-    image_path = Column(String, nullable=True) # Path to the saved image file
+    
+    # --- UPDATED FIELD ---
+    # This now stores the path to the combined PDF
+    pdf_path = Column(String, nullable=True) 
+    
     created_at = Column(DateTime, default=func.now())
     owner_id = Column(Integer, ForeignKey("users.id"))
 
     owner = relationship("User", back_populates="tickets")
     
-    # --- Renamed Field ---
-    # We rename 'extracted_text' to be more specific
+    # This field will now contain the combined text from ALL pages
     raw_text_content = Column(String, nullable=True)
 
-    # --- NEW Structured Data Fields ---
-    # These fields will be populated by the KVP extraction
-    
+    # --- Structured Data Fields (Unchanged) ---
     ticket_number = Column(String, index=True, nullable=True)
     ticket_date = Column(String, nullable=True) # Storing as string for simplicity
     haul_vendor = Column(String, nullable=True)
@@ -47,4 +48,4 @@ class Ticket(Base):
     job_number = Column(String, nullable=True)
     phase_code = Column(String, nullable=True)
     zone = Column(String, nullable=True)
-    hours = Column(Float, nullable=True) # Use Float for hours
+    hours = Column(Float, nullable=True)

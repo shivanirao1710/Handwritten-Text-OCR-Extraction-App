@@ -1,6 +1,8 @@
+// types.ts
+
 export interface Ticket {
   id: number;
-  image_url: string;
+  pdf_url: string; // <-- FIX: Changed from pdf_path to pdf_url
   created_at: string;
   raw_text_content: string;
   ticket_number: string | null;

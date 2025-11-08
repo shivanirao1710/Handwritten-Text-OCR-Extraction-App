@@ -30,12 +30,15 @@ YOLO_MODEL_PATH = 'best.pt'
 models.Base.metadata.create_all(bind=engine)
 
 # --- File Storage Setup ---
-TICKETS_DIR = "tickets"
+TICKETS_DIR = "tickets" # Original image directory
 TEMP_LINES_DIR = "temp_lines"
 DEBUG_DIR = "debug_output"
+PDF_TICKETS_DIR = "ticket_pdfs" # NEW: For storing final PDFs
+
 os.makedirs(TICKETS_DIR, exist_ok=True)
 os.makedirs(TEMP_LINES_DIR, exist_ok=True)
 os.makedirs(DEBUG_DIR, exist_ok=True)
+os.makedirs(PDF_TICKETS_DIR, exist_ok=True) # NEW
 
 app = FastAPI(title="Advanced Handwritten Scanner API")
 
@@ -48,8 +51,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# OLD mount (can be removed if no longer needed, but safer to keep)
 app.mount(f"/{TICKETS_DIR}", StaticFiles(directory=TICKETS_DIR), name="tickets")
 app.mount(f"/{DEBUG_DIR}", StaticFiles(directory=DEBUG_DIR), name="debug")
+# NEW mount for PDFs
+app.mount(f"/{PDF_TICKETS_DIR}", StaticFiles(directory=PDF_TICKETS_DIR), name="ticket_pdfs")
 
 # --- Security and Authentication ---
 SECRET_KEY = "a_very_secret_key_change_in_production"
@@ -409,7 +415,7 @@ def recognize_line(image_path):
         return ""
 
 # ------------------------------------------------------------------- #
-# --- *** UPDATED: STRUCTURED DATA EXTRACTOR *** ---
+# --- *** UPDATED: STRUCTURED DATA EXTRACTOR (UNCHANGED) *** ---
 # ------------------------------------------------------------------- #
 
 def extract_structured_data(raw_text: str) -> dict:
@@ -421,7 +427,6 @@ def extract_structured_data(raw_text: str) -> dict:
         return value.strip(" :-\n\t").strip()
 
     # --- *** STEP 1: (Fast Path) Find values on the SAME LINE *** ---
-    # This is where the bug was. The value regex for material/haul_vendor was bad.
     patterns = {
         "ticket_number": r'(?i)(?:Ticket Number|Ticket#|TICKET NO|Ticket #|Inovice #|Invoice#)\s*[:\-]?\s*([A-Za-z0-9\-]+)',
         "ticket_date":   r'(?i)(?:Date)\s*[:\-]?\s*([\d\/\-]{6,10})', 
@@ -455,7 +460,6 @@ def extract_structured_data(raw_text: str) -> dict:
             print(f"✅ Found {field} (same-line): {value}")
 
     # --- *** STEP 2: (Next-Line/Cell Logic) *** ---
-    # This also has the fixes for material/haul_vendor
     multi_find_patterns = {
         "ticket_number": (r'(?i)(?:Ticket Number|Ticket#|TICKET NO|Ticket #|Inovice #|Invoice#|Ticket # )', r'([A-Za-z0-9\-]+)'),
         "ticket_date":   (r'(?i)(?:Date)', r'([\d\/\-]{6,10})'),
@@ -505,7 +509,7 @@ def extract_structured_data(raw_text: str) -> dict:
                                         results[field] = value
                                         print(f"✅ Found {field} (next-cell): {value}")
                                         break # Found it, move to next field
-                    
+                        
                     if results[field] is not None:
                         break # Value was found in a cell, stop searching this field
 
@@ -573,7 +577,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     return user
 
 # ------------------------------------------------------------------- #
-# --- API ENDPOINTS (UNCHANGED) ---
+# --- API ENDPOINTS (REGISTER, TOKEN - UNCHANGED) ---
 # ------------------------------------------------------------------- #
 @app.post("/register", status_code=status.HTTP_201_CREATED)
 def register_user(form: OAuth2PasswordRequestForm=Depends(), db: Session=Depends(database.get_db)):
@@ -595,101 +599,175 @@ def login(form: OAuth2PasswordRequestForm=Depends(), db: Session=Depends(databas
     }
 
 # ------------------------------------------------------------------- #
-# --- /scan ENDPOINT (UNCHANGED) ---
+# --- *** HEAVILY UPDATED: /scan ENDPOINT *** ---
 # ------------------------------------------------------------------- #
 @app.post("/scan")
-async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depends(get_current_user), db: Session=Depends(database.get_db)):
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image.")
+async def scan_ticket(
+    files: list[UploadFile] = File(...), # <-- CHANGED: Now accepts a list
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files were uploaded.")
 
-    unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{current_user.id}_{os.path.basename(file.filename)}"
-    saved_image_path = os.path.join(TICKETS_DIR, unique_filename)
-    debug_scan_dir = os.path.join(DEBUG_DIR, unique_filename)
+    # --- Create one unique ID for the whole batch ---
+    # --- Create one unique ID for the whole batch ---
+    raw_filename = os.path.basename(files[0].filename) if files[0].filename else "scanned_doc"
+# NEW: Remove the extension (e.g., .jpg) from the filename
+    first_filename, _ = os.path.splitext(raw_filename)
+
+    unique_batch_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{current_user.id}_{first_filename}"
+    debug_scan_dir = os.path.join(DEBUG_DIR, unique_batch_id)
     os.makedirs(debug_scan_dir, exist_ok=True)
 
+    # --- Lists to aggregate data from all pages ---
+    all_pages_pil_images = []
+    all_pages_final_rows = []
+    
+    print(f"Processing {len(files)} file(s) for batch {unique_batch_id}...")
+
     try:
-        file_content = await file.read()
-        
-        original_image_pil = Image.open(io.BytesIO(file_content)).convert("RGB")
-        print("Preprocessing image (basic)...")
-        basic_processed_pil = basic_preprocess(original_image_pil)
-        print("✅ Basic preprocessing complete.")
-        
-        basic_processed_pil.save(saved_image_path, format='PNG')
+        # --- Loop 1: Process each file and extract text ---
+        for index, file in enumerate(files):
+            print(f"--- Processing Page {index + 1} of {len(files)} ---")
+            if not file.content_type or not file.content_type.startswith("image/"):
+                print(f"⚠️ Skipping file {file.filename} (not an image).")
+                continue
+
+            # Create a sub-dir for this page's debug output
+            page_debug_dir = os.path.join(debug_scan_dir, f"page_{index+1}")
+            os.makedirs(page_debug_dir, exist_ok=True)
             
-        table_result = extract_table_data_yolo(basic_processed_pil, debug_scan_dir)
-        
-        image_for_contours = basic_processed_pil.copy()
-        table_data = None
-        table_y_start = float('inf')
+            file_content = await file.read()
+            # We use the *original* image for the PDF
+            original_image_pil = Image.open(io.BytesIO(file_content)).convert("RGB")
+            
+            # Add to list for PDF creation
+            all_pages_pil_images.append(original_image_pil)
+            
+            print("Preprocessing image (basic)...")
+            # We *process* a copy for extraction
+            basic_processed_pil = basic_preprocess(original_image_pil.copy())
+            print("✅ Basic preprocessing complete.")
+            
+            basic_processed_pil.save(
+                os.path.join(page_debug_dir, "0_basic_processed.png"), 
+                format='PNG'
+            )
+            
+            # --- Run Extraction Pipeline for THIS page ---
+            table_result = extract_table_data_yolo(basic_processed_pil, page_debug_dir)
+            
+            image_for_contours = basic_processed_pil.copy()
+            table_data = None
+            table_y_start = float('inf')
 
-        if table_result:
-            print("✅ Table found via YOLO! Will combine with other text.")
-            table_data = table_result["extracted_table"]
-            table_bbox = table_result["table_bbox"]
-            table_y_start = table_bbox[1]
-            draw = ImageDraw.Draw(image_for_contours)
-            draw.rectangle(table_bbox, fill="white")
-            image_for_contours.save(os.path.join(debug_scan_dir, "4_erased_table_from_basic.png"))
-        else:
-            print("⚠️ No table found via YOLO. Processing full page with contour-based segmentation.")
-
-        print("Applying horizontal & vertical line removal to non-table areas...")
-        image_for_contours_cleaned = remove_lines(image_for_contours)
-        print("✅ Line removal complete for non-table areas.")
-        
-        temp_contour_path = os.path.join(debug_scan_dir, "temp_for_contours_CLEANED.png")
-        image_for_contours_cleaned.save(temp_contour_path, format='PNG')
-        
-        print("--- Calling extract_lines_data (for non-table text) ---")
-        line_result = extract_lines_data(temp_contour_path, unique_filename)
-        print("--- Returned from extract_lines_data ---")
-        
-        contour_lines = []
-        if not line_result or not line_result.get("all_lines"):
-            if table_data:
-                print("⚠️ Contour extraction failed, but YOLO found a table. Saving table data only.")
+            if table_result:
+                print("✅ Table found via YOLO!")
+                table_data = table_result["extracted_table"]
+                table_bbox = table_result["table_bbox"]
+                table_y_start = table_bbox[1]
+                draw = ImageDraw.Draw(image_for_contours)
+                draw.rectangle(table_bbox, fill="white")
+                image_for_contours.save(os.path.join(page_debug_dir, "4_erased_table_from_basic.png"))
             else:
-                raise HTTPException(status_code=400, detail="Could not detect any text in the image.")
-        else:
-            print(f"✅ Contour extraction found {len(line_result['all_lines'])} lines of text.")
-            contour_lines = line_result["all_lines"]
+                print("⚠️ No table found via YOLO for this page.")
 
-        final_data_rows = []
-        table_inserted = False
+            print("Applying line removal to non-table areas...")
+            image_for_contours_cleaned = remove_lines(image_for_contours)
+            print("✅ Line removal complete.")
+            
+            temp_contour_path = os.path.join(page_debug_dir, "temp_for_contours_CLEANED.png")
+            image_for_contours_cleaned.save(temp_contour_path, format='PNG')
+            
+            print("--- Calling extract_lines_data (non-table text) ---")
+            line_result = extract_lines_data(temp_contour_path, f"{unique_batch_id}_page_{index+1}")
+            print("--- Returned from extract_lines_data ---")
+            
+            contour_lines = []
+            if line_result and line_result.get("all_lines"):
+                print(f"✅ Contour extraction found {len(line_result['all_lines'])} lines.")
+                contour_lines = line_result["all_lines"]
+            elif table_data:
+                 print("⚠️ Contour extraction failed, but YOLO found a table.")
+            else:
+                print("⚠️ No text (table or contour) found on this page.")
+                continue # Skip this page entirely if it's blank
 
-        for line in contour_lines:
-            if not table_inserted and table_data and line["y"] >= table_y_start:
-                final_data_rows.extend(table_data)
-                table_inserted = True
-            final_data_rows.append(line["row_text"])
+            # --- Combine page data (contours + table) ---
+            page_final_data_rows = []
+            table_inserted = False
+            for line in contour_lines:
+                if not table_inserted and table_data and line["y"] >= table_y_start:
+                    page_final_data_rows.extend(table_data)
+                    table_inserted = True
+                page_final_data_rows.append(line["row_text"])
 
-        if not table_inserted and table_data:
-            final_data_rows.extend(table_data)
+            if not table_inserted and table_data:
+                page_final_data_rows.extend(table_data)
 
-        if not final_data_rows:
-            raise HTTPException(status_code=400, detail="Text extraction resulted in empty content.")
+            if not page_final_data_rows:
+                print("⚠️ Page processing resulted in empty content.")
+                continue
 
-        json_output_rows = []
-        for row in final_data_rows:
-            corrected_row = [correct_currency_symbols(str(cell)) for cell in row]
-            json_output_rows.append(corrected_row)
+            # Add this page's rows to the master list
+            all_pages_final_rows.append({"page": index + 1, "rows": page_final_data_rows})
 
-        db_text_blob = "\n".join([" | ".join(row) for row in json_output_rows])
+        # --- END of page processing loop ---
+
+        if not all_pages_pil_images:
+            raise HTTPException(status_code=400, detail="No valid images were processed.")
+
+        # --- Create the PDF ---
+        print("Creating combined PDF...")
+        pdf_filename = f"{unique_batch_id}.pdf"
+        pdf_path_local = os.path.join(PDF_TICKETS_DIR, pdf_filename)
+        pdf_url_path = f"/{PDF_TICKETS_DIR}/{pdf_filename}"
         
+        first_image = all_pages_pil_images[0]
+        other_images = all_pages_pil_images[1:]
+        
+        # Save the *original* images to the PDF
+        first_image.save(
+            pdf_path_local, 
+            "PDF", 
+            resolution=100.0, 
+            save_all=True, 
+            append_images=other_images
+        )
+        print(f"✅ PDF saved to {pdf_path_local}")
+
+        # --- Combine all text for DB and Structuring ---
+        db_text_blob = ""
+        json_output_rows = []
+        
+        for page_data in all_pages_final_rows:
+            page_header = f"\n--- PAGE {page_data['page']} ---\n"
+            db_text_blob += page_header
+            
+            for row in page_data["rows"]:
+                corrected_row = [correct_currency_symbols(str(cell)) for cell in row]
+                json_output_rows.append(corrected_row) # Add to flat list for JSON response
+                db_text_blob += " | ".join(corrected_row) + "\n"
+
+        if not db_text_blob:
+            print("⚠️ All pages were blank. Saving ticket with PDF but no text.")
+            db_text_blob = "No text could be extracted from the document."
+            # We continue, to at least save the PDF
+
+        print("Extracting structured data from combined text...")
         structured_data = extract_structured_data(db_text_blob)
         
         response_data = {
-            "extracted_text_rows": json_output_rows,
+            "extracted_text_rows": json_output_rows, # Flat list from all pages
             "structured_data": structured_data
         }
         
-        image_url_path = f"/{TICKETS_DIR}/{unique_filename}"
-        
+        print("Saving ticket to database...")
         new_ticket = models.Ticket(
             raw_text_content=db_text_blob,
             owner_id=current_user.id,
-            image_path=image_url_path,
+            pdf_path=pdf_url_path, # <-- UPDATED
             ticket_number=structured_data.get("ticket_number"),
             ticket_date=structured_data.get("ticket_date"),
             haul_vendor=structured_data.get("haul_vendor"),
@@ -703,10 +781,11 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
         
         db.add(new_ticket); db.commit(); db.refresh(new_ticket)
         
-        response_data["image_url"] = image_url_path
+        response_data["pdf_url"] = pdf_url_path # <-- UPDATED
         response_data["ticket_id"] = new_ticket.id
         
-        return {"filename": file.filename, **response_data}
+        print(f"✅ Successfully created ticket {new_ticket.id} with {len(files)} pages.")
+        return {"filename": first_filename, **response_data}
 
     except Exception as e:
         if isinstance(e, HTTPException): raise e
@@ -720,13 +799,12 @@ async def scan_ticket(file: UploadFile=File(...), current_user: models.User=Depe
         if os.path.exists(debug_scan_dir):
             try:
                 pass # Keep debug dir for inspection
-                # shutil.rmtree(debug_scan_dir) # Uncomment to clean up
+                shutil.rmtree(debug_scan_dir) # Uncomment to clean up
             except OSError as e:
                 print(f"Error removing debug directory {debug_scan_dir}: {e.strerror}")
 
-
 # ------------------------------------------------------------------- #
-# --- /update-ticket-text ENDPOINT (UNCHANGED) ---
+# --- *** UPDATED: /update-ticket-text ENDPOINT *** ---
 # ------------------------------------------------------------------- #
 @app.post("/update-ticket-text")
 def update_ticket_text(
@@ -773,7 +851,7 @@ def update_ticket_text(
         "message": "Ticket updated successfully",
         "ticket": {
             "id": ticket.id,
-            "image_url": ticket.image_path,
+            "pdf_url": ticket.pdf_path, # <-- UPDATED
             "raw_text_content": ticket.raw_text_content,
             "ticket_number": ticket.ticket_number,
             "ticket_date": ticket.ticket_date,
@@ -791,7 +869,7 @@ def update_ticket_text(
     return response_data
 
 # ------------------------------------------------------------------- #
-# --- /tickets ENDPOINT (UNCHANGED) ---
+# --- *** UPDATED: /tickets ENDPOINT *** ---
 # ------------------------------------------------------------------- #
 @app.get("/tickets")
 def get_tickets(current_user: models.User = Depends(get_current_user), db: Session = Depends(database.get_db)):
@@ -804,7 +882,7 @@ def get_tickets(current_user: models.User = Depends(get_current_user), db: Sessi
     for ticket in tickets_from_db:
         response.append({
             "id": ticket.id,
-            "image_url": ticket.image_path,
+            "pdf_url": ticket.pdf_path, # <-- UPDATED
             "created_at": ticket.created_at,
             "raw_text_content": ticket.raw_text_content,
             "ticket_number": ticket.ticket_number,
@@ -824,7 +902,7 @@ def get_tickets(current_user: models.User = Depends(get_current_user), db: Sessi
 def read_root():
     return {"message": "Welcome to the Advanced Handwritten Scanner API"}
 
-# Example for running with uvicorn (if you run this file directly)
+# Example for running with uvicorn
 if __name__ == "__main__":
     import uvicorn
     print("--- Starting FastAPI Server ---")
@@ -833,7 +911,3 @@ if __name__ == "__main__":
     print(f"Using Device: {device}")
     print("---------------------------------")
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
-
-    #Extracting separate fields from image

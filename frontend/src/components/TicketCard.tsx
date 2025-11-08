@@ -1,25 +1,31 @@
+// components/TicketCard.tsx
+
 import React from 'react';
-import { View, Text, Image, TouchableOpacity } from 'react-native';
+// REMOVED: Linking, Alert, API_BASE_URL
+import { View, Text, TouchableOpacity } from 'react-native';
 import { styles } from '../styles/styles';
 import { Ticket } from '../types';
-import { API_BASE_URL } from '../api/config';
 import DataRow from './DataRow';
 
 interface Props {
   ticket: Ticket;
   onEdit: (ticket: Ticket) => void;
+  onViewPdf: (ticket: Ticket) => void; // <-- ADD THIS PROP
 }
 
-const TicketCard: React.FC<Props> = ({ ticket, onEdit }) => {
+const TicketCard: React.FC<Props> = ({ ticket, onEdit, onViewPdf }) => { // <-- Add prop to function
+  
+  // --- REMOVED the handleViewPdf function ---
+
   return (
     <View style={styles.ticket}>
-      {ticket.image_url && (
-        <Image
-          source={{ uri: `${API_BASE_URL}${ticket.image_url}` }}
-          style={styles.ticketImage}
-          resizeMode="contain"
-        />
-      )}
+      {/* --- RENDER PDF BUTTON --- */}
+      <TouchableOpacity
+        style={styles.editButton}
+        onPress={() => onViewPdf(ticket)} // <-- UPDATE THIS OnPress
+      >
+        <Text style={styles.editButtonText}>View Original PDF</Text>
+      </TouchableOpacity>
 
       {/* --- RENDER STRUCTURED DATA --- */}
       <View style={styles.structuredContainer}>

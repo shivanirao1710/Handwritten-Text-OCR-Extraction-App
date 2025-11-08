@@ -1,3 +1,5 @@
+// screens/ReviewScreen.tsx
+
 import React, { useState } from 'react';
 import {
   Text,
@@ -5,6 +7,9 @@ import {
   View,
   Alert,
   ScrollView,
+  StyleSheet,
+  Dimensions,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
@@ -15,28 +20,30 @@ import { AppStackParamList } from '../../navigation/AppNavigator';
 import TicketCard from '../../components/TicketCard';
 import EditTicketModal from '../../components/EditTicketModal';
 import { API_BASE_URL } from '../../api/config';
+import Pdf from 'react-native-pdf';
 
 type Props = NativeStackScreenProps<AppStackParamList, 'Review'>;
 
 export default function ReviewScreen({ route, navigation }: Props) {
-  // Get the tickets passed from the Dashboard
+  // --- (Existing states are unchanged) ---
   const { tickets: initialTickets } = route.params;
-  const { authToken } = useAuth();
-
+  const { authToken } = useAuth(); // Make sure authToken is available
   const [tickets, setTickets] = useState<Ticket[]>(initialTickets);
   const [isUpdating, setIsUpdating] = useState(false);
-
-  // States for edit functionality
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [editingTicket, setEditingTicket] = useState<Ticket | null>(null);
 
-  // Function to handle text editing
+  // --- (PDF states are unchanged) ---
+  const [pdfSource, setPdfSource] = useState<object | null>(null);
+  const [isPdfLoading, setIsPdfLoading] = useState<boolean>(false);
+
+  // --- (handleEditText is unchanged) ---
   const handleEditText = (ticket: Ticket) => {
     setEditingTicket(ticket);
     setEditModalVisible(true);
   };
 
-  // Function to save edited text
+  // --- FIX 1: FILL IN THIS FUNCTION ---
   const handleSaveEditedText = async (newRawText: string) => {
     if (!editingTicket) return;
 
@@ -82,14 +89,40 @@ export default function ReviewScreen({ route, navigation }: Props) {
     }
   };
 
-  // Function to cancel editing
+  // --- FIX 2: FILL IN THIS FUNCTION ---
   const handleCancelEdit = () => {
     setEditModalVisible(false);
     setEditingTicket(null);
   };
 
+  // --- (PDF handlers are unchanged) ---
+  const handleViewPdf = (ticket: Ticket) => {
+    if (!ticket.pdf_url) {
+      Alert.alert('Error', 'No PDF URL found for this ticket.');
+      return;
+    }
+    const url = `${API_BASE_URL}${ticket.pdf_url}`;
+    console.log('Loading PDF from:', url);
+
+    setPdfSource({
+      uri: url,
+      cache: true,
+      headers: {
+        'ngrok-skip-browser-warning': 'true',
+      },
+    });
+    setIsPdfLoading(true);
+  };
+
+  const handleClosePdf = () => {
+    setPdfSource(null);
+    setIsPdfLoading(false);
+  };
+  // ----------------------------------------------
+
   return (
     <SafeAreaView style={styles.container}>
+      {/* ... (rest of your render logic is unchanged) ... */}
       <Text style={styles.title}>Review Tickets</Text>
       <ScrollView style={styles.ticketsContainer}>
         {tickets.length > 0 ? (
@@ -98,6 +131,7 @@ export default function ReviewScreen({ route, navigation }: Props) {
               key={ticket.id}
               ticket={ticket}
               onEdit={() => handleEditText(ticket)}
+              onViewPdf={handleViewPdf}
             />
           ))
         ) : (
@@ -111,7 +145,7 @@ export default function ReviewScreen({ route, navigation }: Props) {
         <Text style={styles.buttonText}>Back to Dashboard</Text>
       </TouchableOpacity>
 
-      {/* Edit Modal */}
+      {/* --- (Edit Modal is unchanged) --- */}
       {editingTicket && (
         <EditTicketModal
           visible={editModalVisible}
@@ -121,6 +155,74 @@ export default function ReviewScreen({ route, navigation }: Props) {
           onClose={handleCancelEdit}
         />
       )}
+
+      {/* --- (PDF Overlay is unchanged) --- */}
+      {pdfSource && (
+        <View style={pdfStyles.pdfViewerOverlay}>
+          <Pdf
+            source={pdfSource}
+            trustAllCerts={false}
+            style={pdfStyles.pdf}
+            onLoadComplete={() => setIsPdfLoading(false)}
+            onError={(error) => {
+              console.log('PDF load error:', error);
+              Alert.alert('Error', 'Failed to load PDF.');
+              handleClosePdf();
+            }}
+          />
+          <TouchableOpacity
+            onPress={handleClosePdf}
+            style={pdfStyles.closeButton}>
+            <Text style={pdfStyles.closeButtonText}>✕ Close</Text>
+          </TouchableOpacity>
+          {isPdfLoading && (
+            <ActivityIndicator
+              size="large"
+              color="#007BFF"
+              style={pdfStyles.loadingIndicator}
+            />
+          )}
+        </View>
+      )}
     </SafeAreaView>
   );
 }
+
+// --- (PDF Styles are unchanged) ---
+const pdfStyles = StyleSheet.create({
+  pdfViewerOverlay: {
+    position: 'absolute',
+    zIndex: 1000,
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'white',
+  },
+  pdf: {
+    flex: 1,
+    width: Dimensions.get('window').width,
+    height: Dimensions.get('window').height,
+  },
+  closeButton: {
+    position: 'absolute',
+    top: 50, // Adjust for status bar
+    right: 20,
+    zIndex: 1020,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  closeButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  loadingIndicator: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    zIndex: 1010,
+  },
+});

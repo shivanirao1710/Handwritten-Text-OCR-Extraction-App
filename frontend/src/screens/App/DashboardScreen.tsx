@@ -37,78 +37,75 @@ export default function DashboardScreen({ navigation }: Props) {
       if (scannedImages && scannedImages.length > 0) {
         navigation.navigate('Processing'); // Show processing screen
 
-        let successCount = 0;
-        let failedCount = 0;
-
+        // --- NEW LOGIC: Build ONE FormData ---
+        const formData = new FormData();
+        
         for (const [index, imageUri] of scannedImages.entries()) {
-          console.log(
-            `Processing image ${index + 1} of ${scannedImages.length}...`,
-          );
-          try {
-            const formData = new FormData();
-            formData.append('file', {
-              uri: imageUri,
-              type: 'image/jpeg',
-              name: `ticket_page_${index + 1}.jpg`,
-            });
-
-            const response = await fetch(`${API_BASE_URL}/scan`, {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${authToken}` },
-              body: formData,
-            });
-
-            if (response.ok) {
-              successCount++;
-            } else {
-              const errorData = await response.json();
-              console.error(
-                `Failed to process image ${index + 1}:`,
-                errorData.detail,
-              );
-              failedCount++;
-            }
-          } catch (uploadError) {
-            console.error(`Error uploading image ${index + 1}:`, uploadError);
-            failedCount++;
-          }
+          console.log(`Appending image ${index + 1} to form data...`);
+          // Note the key is 'files' (plural) to match the backend
+          formData.append('files', {
+            uri: imageUri,
+            type: 'image/jpeg',
+            name: `ticket_page_${index + 1}.jpg`,
+          });
         }
+        
+        // --- NEW LOGIC: Make ONE API call for the entire batch ---
+        try {
+          const response = await fetch(`${API_BASE_URL}/scan`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${authToken}` },
+            body: formData,
+            // 'Content-Type': 'multipart/form-data' is set automatically
+          });
 
-        Alert.alert(
-          'Processing Complete',
-          `Successfully processed ${successCount} image(s).\nFailed to process ${failedCount} image(s).`,
-        );
-
-        // After scanning, automatically fetch the new list and go to review
-        if (successCount > 0) {
-          // Re-fetch the full list to include the new tickets
-          try {
-            const response = await fetch(`${API_BASE_URL}/tickets`, {
-              method: 'GET',
-              headers: { Authorization: `Bearer ${authToken}` },
-            });
-            if (response.ok) {
-              const data: Ticket[] = await response.json();
-              navigation.navigate('Review', { tickets: data }); // Navigate with fresh data
-            } else {
-              Alert.alert('Fetch Failed', 'Could not retrieve new tickets.');
-              navigation.navigate('Dashboard'); // Go back to dashboard
-            }
-          } catch {
+          if (response.ok) {
+            // Batch success!
             Alert.alert(
-              'Error',
-              'An error occurred while fetching new tickets.',
+              'Processing Complete',
+              `Successfully processed ${scannedImages.length} image(s).`,
             );
-            navigation.navigate('Dashboard');
+            
+            // Re-fetch the full list to include the new ticket
+            try {
+              const listResponse = await fetch(`${API_BASE_URL}/tickets`, {
+                method: 'GET',
+                headers: { Authorization: `Bearer ${authToken}` },
+              });
+              if (listResponse.ok) {
+                const data: Ticket[] = await listResponse.json();
+                navigation.navigate('Review', { tickets: data }); // Navigate with fresh data
+              } else {
+                Alert.alert('Fetch Failed', 'Could not retrieve new tickets.');
+                navigation.navigate('Dashboard');
+              }
+            } catch (fetchErr) {
+              Alert.alert('Error', 'An error occurred while fetching new tickets.');
+              navigation.navigate('Dashboard');
+            }
+
+          } else {
+            // Batch Scan/Upload failed
+            const errorData = await response.json();
+            console.error('Failed to process document:', errorData.detail);
+            Alert.alert(
+              'Processing Failed',
+              `Could not process the document. ${errorData.detail || ''}`,
+            );
+            navigation.navigate('Dashboard'); // Go back
           }
-        } else {
-          navigation.navigate('Dashboard'); // Go back to dashboard if all failed
+        
+        } catch (uploadError) {
+          console.error('Error uploading document:', uploadError);
+          Alert.alert('Upload Error', 'An error occurred while uploading the document.');
+          navigation.navigate('Dashboard');
         }
+
       } else {
         setIsScanning(false); // No images scanned
       }
     } catch (error) {
-      console.error('Scan or Upload Error:', error);
+      console.error('Scan Error:', error);
       Alert.alert(
         'Error',
         'An error occurred during the scan. Please try again.',
@@ -116,7 +113,6 @@ export default function DashboardScreen({ navigation }: Props) {
       navigation.navigate('Dashboard');
     }
     // Note: We don't set isScanning(false) here because navigation is handling the screen change.
-    // It will be false when the user returns to this screen.
   };
 
   const handleReviewTickets = async () => {
