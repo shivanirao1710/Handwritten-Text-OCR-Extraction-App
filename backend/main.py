@@ -1,6 +1,7 @@
 import io
 import os
 import shutil
+import re  # <-- Already here, but important for sanitizing
 from PIL import Image, ImageDraw
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,7 +15,6 @@ import cv2
 import numpy as np
 import torch
 from tqdm import tqdm
-import re
 # Local imports
 import models
 import database
@@ -97,6 +97,24 @@ def correct_currency_symbols(text: str) -> str:
     text = re.sub(r'(?<=\d)[oO](?=\d)', '0', text)
 
     return text
+
+
+# --------------------------------------------------------
+# --- *** NEW: Filename Sanitizer *** ---
+# --------------------------------------------------------
+def sanitize_filename(filename: str) -> str:
+    """Removes characters that are problematic in filenames."""
+    if not filename:
+        return "default"
+    # Replace spaces, slashes, and other common invalid chars with underscore
+    sanitized = re.sub(r'[\\/*?:"<>| \']', '_', filename)
+    # Remove any trailing underscores or dots
+    sanitized = sanitized.strip("._")
+    # In case stripping leaves an empty string
+    if not sanitized:
+        return "file"
+    # Limit length
+    return sanitized[:100]
 
 
 # ------------------------------------------------------------------- #
@@ -610,21 +628,47 @@ async def scan_ticket(
     if not files:
         raise HTTPException(status_code=400, detail="No files were uploaded.")
 
-    # --- Create one unique ID for the whole batch ---
-    # --- Create one unique ID for the whole batch ---
+    # --- Get base filename from the first file ---
     raw_filename = os.path.basename(files[0].filename) if files[0].filename else "scanned_doc"
-# NEW: Remove the extension (e.g., .jpg) from the filename
-    first_filename, _ = os.path.splitext(raw_filename)
+    first_filename_raw, _ = os.path.splitext(raw_filename)
 
-    unique_batch_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{current_user.id}_{first_filename}"
-    debug_scan_dir = os.path.join(DEBUG_DIR, unique_batch_id)
+    # --- Sanitize components for filename ---
+    sane_username = sanitize_filename(current_user.username)
+    sane_filename = sanitize_filename(first_filename_raw)
+
+    # --- *** NEW: Clean the filename (remove _page_1, etc.) *** ---
+    # Try to remove suffixes like _page_1, -page_1, .page_1, _p1, etc.
+    cleaned_sane_filename = re.sub(r'[_.-]?(page|p)[_.-]?\d+$', '', sane_filename, flags=re.IGNORECASE)
+    
+    # If cleaning removes everything (e.g., filename was just "page_1"),
+    # fall back to the original sanitized name.
+    if not cleaned_sane_filename:
+        final_sane_filename = sane_filename
+    else:
+        final_sane_filename = cleaned_sane_filename
+    # --- *** END of new cleaning step *** ---
+
+
+    # --- *** NEW: Split filenames *** ---
+    # 1. User-facing PDF name (what you want)
+    #    e.g., "shiv_ticket"
+    pdf_base_name = f"{sane_username}_{final_sane_filename}" # <-- UPDATED to use final_sane_filename
+
+    # 2. Internally unique ID for debug/temp folders (to prevent collisions)
+    #    e.g., "20251110160107_shiv_ticket"
+    timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    internal_unique_id = f"{timestamp}_{pdf_base_name}"
+    
+    # Use the INTERNALLY UNIQUE ID for the debug directory
+    debug_scan_dir = os.path.join(DEBUG_DIR, internal_unique_id)
     os.makedirs(debug_scan_dir, exist_ok=True)
 
     # --- Lists to aggregate data from all pages ---
     all_pages_pil_images = []
     all_pages_final_rows = []
     
-    print(f"Processing {len(files)} file(s) for batch {unique_batch_id}...")
+    # Log using the *internal* ID so we can find the debug folder
+    print(f"Processing {len(files)} file(s) for batch {internal_unique_id}...")
 
     try:
         # --- Loop 1: Process each file and extract text ---
@@ -681,7 +725,8 @@ async def scan_ticket(
             image_for_contours_cleaned.save(temp_contour_path, format='PNG')
             
             print("--- Calling extract_lines_data (non-table text) ---")
-            line_result = extract_lines_data(temp_contour_path, f"{unique_batch_id}_page_{index+1}")
+            # Use the INTERNALLY UNIQUE ID for temp line folders
+            line_result = extract_lines_data(temp_contour_path, f"{internal_unique_id}_page_{index+1}")
             print("--- Returned from extract_lines_data ---")
             
             contour_lines = []
@@ -720,7 +765,10 @@ async def scan_ticket(
 
         # --- Create the PDF ---
         print("Creating combined PDF...")
-        pdf_filename = f"{unique_batch_id}.pdf"
+        
+        # --- *** UPDATED: Use the user-facing name for the PDF *** ---
+        pdf_filename = f"{pdf_base_name}.pdf"
+        
         pdf_path_local = os.path.join(PDF_TICKETS_DIR, pdf_filename)
         pdf_url_path = f"/{PDF_TICKETS_DIR}/{pdf_filename}"
         
@@ -785,7 +833,9 @@ async def scan_ticket(
         response_data["ticket_id"] = new_ticket.id
         
         print(f"✅ Successfully created ticket {new_ticket.id} with {len(files)} pages.")
-        return {"filename": first_filename, **response_data}
+        
+        # --- UPDATED: Return the *cleaned* filename ---
+        return {"filename": final_sane_filename, **response_data}
 
     except Exception as e:
         if isinstance(e, HTTPException): raise e
@@ -802,7 +852,6 @@ async def scan_ticket(
                 shutil.rmtree(debug_scan_dir) # Uncomment to clean up
             except OSError as e:
                 print(f"Error removing debug directory {debug_scan_dir}: {e.strerror}")
-
 # ------------------------------------------------------------------- #
 # --- *** UPDATED: /update-ticket-text ENDPOINT *** ---
 # ------------------------------------------------------------------- #
@@ -911,3 +960,5 @@ if __name__ == "__main__":
     print(f"Using Device: {device}")
     print("---------------------------------")
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    # PDF UPLOAD DONE
